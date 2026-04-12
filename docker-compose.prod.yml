@@ -1,0 +1,7 @@
+# Production docker-compose — configured in Phase 6
+# Extends docker-compose.yml with production settings:
+# - No port exposure except reverse proxy
+# - Resource limits
+# - Restart policies
+# - PM2 process manager
+# - Sentry error tracking

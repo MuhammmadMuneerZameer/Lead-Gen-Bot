@@ -1,0 +1,15 @@
+{
+  "name": "hydrafox",
+  "private": true,
+  "workspaces": [
+    "apps/*"
+  ],
+  "scripts": {
+    "dev:backend": "npm run dev --workspace=apps/backend",
+    "build:backend": "npm run build --workspace=apps/backend",
+    "dev:frontend": "npm run dev --workspace=apps/frontend"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  }
+}

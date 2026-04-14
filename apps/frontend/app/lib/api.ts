@@ -114,11 +114,15 @@ export interface Lead {
   businessName: string;
   domain: string;
   website?: string;
+  phone?: string;
+  email?: string;
+  socialLinks: string[];
+  websiteQuality: 'outdated' | 'basic' | 'modern' | 'unknown';
   industry?: string;
   industryTier: 1 | 2 | 3;
-  score: number;
+  opportunityScore: number;
+  opportunityLevel: 'high' | 'medium' | 'low';
   scoreBreakdown: Record<string, number>;
-  priority: 'hot' | 'warm' | 'cold';
   status: string;
   source: string;
   tags: string[];
@@ -134,12 +138,18 @@ export interface LeadListResponse {
 export interface LeadFilters {
   page?: number;
   limit?: number;
-  priority?: string;
+  opportunityLevel?: string;
   status?: string;
   industry?: string;
   search?: string;
   sortBy?: string;
   sortDir?: string;
+}
+
+export interface ScoringConfig {
+  version: number;
+  weights: Record<string, number>;
+  notes?: string;
 }
 
 export const leads = {
@@ -177,10 +187,10 @@ export const jobs = {
   stats: () => request<QueueStats>('/api/jobs'),
   pause: (queue: string) => request<unknown>(`/api/jobs/${queue}/pause`, { method: 'POST' }),
   resume: (queue: string) => request<unknown>(`/api/jobs/${queue}/resume`, { method: 'POST' }),
-  enqueueScrape: (query: string, source = 'gmaps', location?: string) =>
-    request<{ jobId: string }>('/api/jobs/scrape', {
+  enqueueScrape: (query: string, sources: string[] = ['gmaps'], location?: string, autoExpand = false) =>
+    request<{ jobId: string; sources: string[] }>('/api/jobs/scrape', {
       method: 'POST',
-      body: JSON.stringify({ query, source, location }),
+      body: JSON.stringify({ query, sources, location, autoExpand }),
     }),
 };
 

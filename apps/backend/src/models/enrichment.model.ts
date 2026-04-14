@@ -10,6 +10,10 @@ export interface IEnrichment extends Document {
   mobileFriendly: boolean;
   hasSSL: boolean;
   hasChatbot: boolean;
+  phone?: string;
+  email?: string;
+  socialLinks: string[];
+  websiteQuality: 'outdated' | 'basic' | 'modern' | 'unknown';
   hasBookingSystem: boolean;
   hasEcommerce: boolean;
   hasContactForm: boolean;
@@ -53,6 +57,14 @@ const EnrichmentSchema = new Schema<IEnrichment>(
       type: String,
       enum: ['active', 'inactive', 'unknown'],
       default: 'unknown',
+    },
+    phone: { type: String },
+    email: { type: String },
+    socialLinks: { type: [String], default: [] },
+    websiteQuality: {
+      type: String,
+      enum: ['outdated', 'basic', 'modern', 'unknown'],
+      default: 'unknown'
     },
     detectedPains: {
       type: [String],

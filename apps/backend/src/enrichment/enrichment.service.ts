@@ -1,40 +1,33 @@
 /**
  * EnrichmentService — fetches and analyses a business website.
  *
- * Pipeline per lead:
- *  1. Playwright headless fetch (chromium)
- *  2. Wappalyzer-style tech detection from HTML/headers
- *  3. Synthetic performance score from response timing + HTML size
- *  4. SEO + quality signal extraction
- *  5. Returns a fully populated Enrichment document payload
- *
- * Browser instance is shared across concurrent jobs (one per process).
+ * Improvements over v1:
+ *  - Extracts emails from mailto: href links first (most reliable)
+ *  - Scans homepage + /contact + /about + /contact-us + /about-us
+ *  - Better phone regex with cleanup and validation
+ *  - Retry on network failure (up to 2 attempts)
+ *  - Deduplicates and validates all extracted data
  */
 
 import { chromium, Browser, BrowserContext } from 'playwright-core';
 import { logger } from '../lib/logger';
 
 export interface EnrichmentResult {
+  phone?: string;
+  email?: string;
+  socialLinks: string[];
+  websiteQuality: 'outdated' | 'basic' | 'modern' | 'unknown';
   techStack: string[];
   cms: 'WordPress' | 'Shopify' | 'Wix' | 'Squarespace' | 'custom' | 'unknown';
-  performanceScore: number;
-  seoScore: number;
-  siteQualityScore: number;
-  mobileFriendly: boolean;
-  hasSSL: boolean;
-  hasChatbot: boolean;
-  hasBookingSystem: boolean;
-  hasEcommerce: boolean;
-  hasContactForm: boolean;
   automationLevel: 'none' | 'basic' | 'moderate' | 'advanced';
   automationSignals: string[];
-  socialActivity: 'active' | 'inactive' | 'unknown';
-  detectedPains: string[];
-  rawHtmlSnapshot: string;
   siteStatus: 'live' | 'unreachable' | 'redirect' | 'error';
+  rawHtmlSnapshot: string;
+  hasSSL: boolean;
+  hasChatbot: boolean;
+  hasContactForm: boolean;
+  mobileFriendly: boolean;
 }
-
-// ── Singleton browser management ─────────────────────────────────────────────
 
 let browser: Browser | null = null;
 
@@ -44,313 +37,371 @@ async function getBrowser(): Promise<Browser> {
     headless: true,
     args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'],
   });
-  logger.info('Playwright browser launched');
   return browser;
 }
 
-export async function closeBrowser(): Promise<void> {
-  if (browser) {
-    await browser.close();
-    browser = null;
-    logger.info('Playwright browser closed');
+// ── Email extraction ─────────────────────────────────────────────────────────
+
+/** Extract emails from mailto: hrefs — highest accuracy */
+function extractMailtoEmails(html: string): string[] {
+  const mailtoRegex = /mailto:([a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,})/gi;
+  const found: string[] = [];
+  let m: RegExpExecArray | null;
+  while ((m = mailtoRegex.exec(html)) !== null) {
+    found.push(m[1].toLowerCase());
   }
+  return [...new Set(found)];
 }
 
-// ── Tech stack detection (Wappalyzer-style heuristics) ───────────────────────
+/** Extract emails from plain text/HTML — secondary pass */
+function extractTextEmails(html: string): string[] {
+  // Remove script/style blocks to reduce noise
+  const cleaned = html
+    .replace(/<script[\s\S]*?<\/script>/gi, '')
+    .replace(/<style[\s\S]*?<\/style>/gi, '');
 
-interface TechSignature {
-  name: string;
-  patterns: RegExp[];
+  const emailRegex = /[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}/g;
+  const raw = Array.from(new Set(cleaned.match(emailRegex) || []));
+
+  // Filter noise: image extensions, common non-emails, very short domains
+  return raw
+    .filter(e => !e.match(/\.(png|jpg|gif|svg|webp|css|js|woff|ttf|eot|ico)$/i))
+    .filter(e => !e.match(/^(noreply|no-reply|donotreply|do-not-reply|support|example|test|demo|sentry|placeholder|user|admin@example|info@example)/i))
+    .filter(e => e.includes('.') && e.split('@')[1]?.includes('.'))
+    .map(e => e.toLowerCase());
 }
 
-const TECH_SIGNATURES: TechSignature[] = [
-  // CMS
-  { name: 'WordPress', patterns: [/wp-content\//i, /wp-includes\//i, /wordpress/i] },
-  { name: 'Shopify', patterns: [/shopify/i, /cdn\.shopify\.com/i, /myshopify\.com/i] },
-  { name: 'Wix', patterns: [/wix\.com/i, /wixsite\.com/i, /wixstatic\.com/i] },
-  { name: 'Squarespace', patterns: [/squarespace\.com/i, /sqspcdn\.com/i] },
-  { name: 'Webflow', patterns: [/webflow\.com/i, /webflow\.io/i] },
-  { name: 'GoDaddy Website Builder', patterns: [/godaddysites\.com/i, /godaddy/i] },
-  // Booking / reservation
-  { name: 'Calendly', patterns: [/calendly\.com/i] },
-  { name: 'Acuity Scheduling', patterns: [/acuityscheduling\.com/i] },
-  { name: 'Booksy', patterns: [/booksy\.com/i] },
-  { name: 'OpenTable', patterns: [/opentable\.com/i] },
-  { name: 'Mindbody', patterns: [/mindbodyonline\.com/i] },
-  // Live chat / chatbots
-  { name: 'Intercom', patterns: [/intercom\.com/i, /intercomcdn\.com/i] },
-  { name: 'Drift', patterns: [/drift\.com/i] },
-  { name: 'Crisp', patterns: [/crisp\.chat/i] },
-  { name: 'LiveChat', patterns: [/livechatinc\.com/i] },
-  { name: 'Tidio', patterns: [/tidio\.com/i] },
-  { name: 'Zendesk', patterns: [/zendesk\.com/i] },
-  // E-commerce signals
-  { name: 'WooCommerce', patterns: [/woocommerce/i] },
-  { name: 'BigCommerce', patterns: [/bigcommerce\.com/i] },
-  { name: 'Stripe', patterns: [/stripe\.com/i, /js\.stripe\.com/i] },
-  { name: 'PayPal', patterns: [/paypal\.com/i] },
-  // Marketing automation
-  { name: 'HubSpot', patterns: [/hubspot\.com/i, /hs-scripts\.com/i] },
-  { name: 'Mailchimp', patterns: [/mailchimp\.com/i, /chimpified\.com/i] },
-  { name: 'ActiveCampaign', patterns: [/activecampaign\.com/i] },
-  { name: 'Klaviyo', patterns: [/klaviyo\.com/i] },
-  // Analytics
-  { name: 'Google Analytics', patterns: [/google-analytics\.com/i, /gtag\/js/i, /ga\('create'/i] },
-  { name: 'Facebook Pixel', patterns: [/connect\.facebook\.net/i, /fbq\(/i] },
-  // Misc
-  { name: 'React', patterns: [/react\.production\.min\.js/i, /__NEXT_DATA__/i, /data-reactroot/i] },
-  { name: 'Vue.js', patterns: [/vue\.min\.js/i, /data-v-/i] },
-  { name: 'jQuery', patterns: [/jquery\.min\.js/i, /\$\.ajax/i] },
-  { name: 'Bootstrap', patterns: [/bootstrap\.min\.css/i, /class="container/i] },
-  { name: 'Tailwind CSS', patterns: [/tailwindcss/i] },
-];
-
-const CMS_PRIORITY: Array<'WordPress' | 'Shopify' | 'Wix' | 'Squarespace'> = ['WordPress', 'Shopify', 'Wix', 'Squarespace'];
-
-function detectTechStack(html: string, headers: Record<string, string>): {
-  techStack: string[];
-  cms: EnrichmentResult['cms'];
-} {
-  const combined = html + JSON.stringify(headers);
-  const detected = TECH_SIGNATURES.filter(sig =>
-    sig.patterns.some(p => p.test(combined)),
-  ).map(sig => sig.name);
-
-  const cms = CMS_PRIORITY.find(c => detected.includes(c)) ?? 'custom';
-  return { techStack: detected.slice(0, 10), cms };
+/** Merge mailto (priority) + text emails, deduplicated */
+function extractEmails(html: string): string[] {
+  const mailto = extractMailtoEmails(html);
+  const text = extractTextEmails(html);
+  // mailto emails come first as they are the most intentionally placed
+  return [...new Set([...mailto, ...text])];
 }
 
-// ── Signal extractors ────────────────────────────────────────────────────────
+// ── Phone extraction ─────────────────────────────────────────────────────────
 
-function detectBookingSystem(html: string, techStack: string[]): boolean {
-  const bookingKeywords = /book\s+(now|online|appointment|a\s+call)|schedule|reserve|appointment|calendar/i;
-  const bookingTech = ['Calendly', 'Acuity Scheduling', 'Booksy', 'OpenTable', 'Mindbody'];
-  return bookingKeywords.test(html) || bookingTech.some(t => techStack.includes(t));
+/** Clean and validate a raw phone string */
+function cleanPhone(raw: string): string | null {
+  const digits = raw.replace(/\D/g, '');
+  // Valid phone: 7–15 digits (international range)
+  if (digits.length < 7 || digits.length > 15) return null;
+  // Skip strings that are clearly not phones (years, zip codes, etc.)
+  if (/^(19|20)\d{2}$/.test(digits)) return null;
+  return raw.trim();
 }
 
-function detectChatbot(html: string, techStack: string[]): boolean {
-  const chatTech = ['Intercom', 'Drift', 'Crisp', 'LiveChat', 'Tidio', 'Zendesk'];
-  const chatKeywords = /live\s?chat|chat\s?bot|chat\s?with\s+us/i;
-  return chatTech.some(t => techStack.includes(t)) || chatKeywords.test(html);
+function extractPhones(html: string): string[] {
+  // Remove scripts and styles first
+  const cleaned = html
+    .replace(/<script[\s\S]*?<\/script>/gi, '')
+    .replace(/<style[\s\S]*?<\/style>/gi, '');
+
+  // Multiple patterns to maximise recall:
+  const patterns = [
+    // tel: href  — most reliable
+    /tel:([\+\d\s()\-\.]{7,20})/gi,
+    // US format: (123) 456-7890 or 123-456-7890
+    /\(?\d{3}\)?[\s.\-]\d{3}[\s.\-]\d{4}/g,
+    // International: +1 123 456 7890 or +44 20 1234 5678
+    /\+\d{1,3}[\s.\-]?\(?\d{1,4}\)?[\s.\-]?\d{3,4}[\s.\-]?\d{3,4}/g,
+    // 10-digit run: 1234567890
+    /\b\d{10}\b/g,
+  ];
+
+  const found: string[] = [];
+  for (const re of patterns) {
+    let m: RegExpExecArray | null;
+    const r = new RegExp(re.source, re.flags);
+    while ((m = r.exec(cleaned)) !== null) {
+      const candidate = (m[1] ?? m[0]).trim();
+      const clean = cleanPhone(candidate);
+      if (clean) found.push(clean);
+    }
+  }
+
+  // Deduplicate by digit fingerprint
+  const seen = new Set<string>();
+  const deduped: string[] = [];
+  for (const p of found) {
+    const key = p.replace(/\D/g, '');
+    if (!seen.has(key)) { seen.add(key); deduped.push(p); }
+  }
+  return deduped;
 }
 
-function detectContactForm(html: string): boolean {
-  return /<form[^>]*>/i.test(html) && /contact|email|message|enquir/i.test(html);
+// ── Social links ─────────────────────────────────────────────────────────────
+
+function extractSocials(html: string): string[] {
+  const patterns = [
+    /https?:\/\/(www\.)?facebook\.com\/(?!sharer|share|login|pg|pages\/create)[a-zA-Z0-9._\-/]+/gi,
+    /https?:\/\/(www\.)?instagram\.com\/[a-zA-Z0-9._\-]+\/?/gi,
+    /https?:\/\/(www\.)?linkedin\.com\/(company|in)\/[a-zA-Z0-9_\-]+/gi,
+    /https?:\/\/(www\.)?twitter\.com\/[a-zA-Z0-9_]+/gi,
+    /https?:\/\/(www\.)?x\.com\/[a-zA-Z0-9_]+/gi,
+    /https?:\/\/(www\.)?tiktok\.com\/@[a-zA-Z0-9._\-]+/gi,
+  ];
+
+  const socials: string[] = [];
+  for (const p of patterns) {
+    const matches = html.match(p) ?? [];
+    socials.push(...matches.slice(0, 2));
+  }
+  return [...new Set(socials)].slice(0, 8);
 }
 
-function detectEcommerce(html: string, techStack: string[]): boolean {
-  const ecomTech = ['WooCommerce', 'BigCommerce', 'Shopify', 'Stripe', 'PayPal'];
-  const ecomKeywords = /add to cart|buy now|checkout|shopping cart/i;
-  return ecomTech.some(t => techStack.includes(t)) || ecomKeywords.test(html);
+// ── Quality / CMS / Automation ───────────────────────────────────────────────
+
+function detectQuality(html: string): EnrichmentResult['websiteQuality'] {
+  const hasViewport = /<meta[^>]*viewport/i.test(html);
+  const hasTables = /<table[^>]*>/i.test(html.slice(0, 3000));
+  const isModern = /Tailwind|React|Next\.js|Vue|Vite|nuxt|angular/i.test(html);
+  const hasFramework = /data-reactroot|__next|__nuxt|ng-app/i.test(html);
+  if (!hasViewport || hasTables) return 'outdated';
+  if (isModern || hasFramework) return 'modern';
+  return 'basic';
 }
 
-function detectAutomationLevel(techStack: string[]): {
+function detectCMS(html: string): EnrichmentResult['cms'] {
+  if (/wp-content|wp-includes|wordpress/i.test(html)) return 'WordPress';
+  if (/shopify|cdn\.shopify\.com/i.test(html)) return 'Shopify';
+  if (/wix\.com|X-Wix-Published-Version/i.test(html)) return 'Wix';
+  if (/squarespace\.com|static\.squarespace/i.test(html)) return 'Squarespace';
+  if (/React|Next\.js|Vue|Angular|Nuxt/i.test(html)) return 'custom';
+  return 'unknown';
+}
+
+function detectAutomation(html: string): {
   level: EnrichmentResult['automationLevel'];
   signals: string[];
 } {
-  const marketingAutomation = ['HubSpot', 'ActiveCampaign', 'Klaviyo', 'Mailchimp'];
-  const bookingTools = ['Calendly', 'Acuity Scheduling', 'Booksy', 'OpenTable', 'Mindbody'];
-  const chatTools = ['Intercom', 'Drift', 'Crisp', 'LiveChat', 'Tidio'];
-
   const signals: string[] = [];
-  const detectedMarketing = marketingAutomation.filter(t => techStack.includes(t));
-  const detectedBooking = bookingTools.filter(t => techStack.includes(t));
-  const detectedChat = chatTools.filter(t => techStack.includes(t));
+  if (/chatbot|livechat|intercom|drift|tawk\.to|crisp\.chat/i.test(html)) signals.push('live chat');
+  if (/calendly|booking|schedule.*appointment|book.*online/i.test(html)) signals.push('online booking');
+  if (/mailchimp|klaviyo|hubspot|newsletter/i.test(html)) signals.push('email marketing');
+  if (/stripe|paypal|payment|checkout/i.test(html)) signals.push('online payment');
+  if (/analytics|gtag|fbq|_ga/i.test(html)) signals.push('web analytics');
+  if (/zapier|automation|webhook/i.test(html)) signals.push('automation tools');
+  if (/crm|salesforce|zoho/i.test(html)) signals.push('CRM integration');
 
-  signals.push(...detectedMarketing, ...detectedBooking, ...detectedChat);
+  const level: EnrichmentResult['automationLevel'] =
+    signals.length >= 4 ? 'advanced' :
+    signals.length >= 2 ? 'moderate' :
+    signals.length >= 1 ? 'basic' : 'none';
 
-  const score = detectedMarketing.length * 2 + detectedBooking.length + detectedChat.length;
-
-  let level: EnrichmentResult['automationLevel'] = 'none';
-  if (score >= 5) level = 'advanced';
-  else if (score >= 3) level = 'moderate';
-  else if (score >= 1) level = 'basic';
-
-  return { level, signals: signals.slice(0, 5) };
+  return { level, signals };
 }
 
-function detectPains(html: string, cms: string, automationLevel: string): string[] {
-  const pains: string[] = [];
-  if (automationLevel === 'none') pains.push('No marketing automation detected');
-  if (cms === 'Wix' || cms === 'Squarespace') pains.push(`Using ${cms} — likely no backend flexibility`);
-  if (!/https/i.test(html.slice(0, 500))) pains.push('Possible SSL issues detected');
-  if (!/<meta[^>]*viewport/i.test(html)) pains.push('Possibly not mobile-optimized');
-  if (!/<meta[^>]*description/i.test(html)) pains.push('Missing meta description — poor SEO');
-  if (html.length < 5000) pains.push('Very thin content — minimal web presence');
-  return pains.slice(0, 5);
+function detectTechStack(html: string): string[] {
+  const stack: string[] = [];
+  if (/react|reactjs/i.test(html)) stack.push('React');
+  if (/next\.js|__next/i.test(html)) stack.push('Next.js');
+  if (/vue\.js|vuejs/i.test(html)) stack.push('Vue.js');
+  if (/angular/i.test(html)) stack.push('Angular');
+  if (/jquery/i.test(html)) stack.push('jQuery');
+  if (/tailwindcss|tailwind/i.test(html)) stack.push('Tailwind CSS');
+  if (/bootstrap/i.test(html)) stack.push('Bootstrap');
+  if (/google-analytics|gtag\.js/i.test(html)) stack.push('Google Analytics');
+  if (/gtm\.js|googletagmanager/i.test(html)) stack.push('Google Tag Manager');
+  if (/stripe/i.test(html)) stack.push('Stripe');
+  if (/woocommerce/i.test(html)) stack.push('WooCommerce');
+  if (/elementor/i.test(html)) stack.push('Elementor');
+  return stack.slice(0, 10);
 }
 
-// ── Synthetic scoring ────────────────────────────────────────────────────────
+// ── Sub-page URLs to scan for contact info ───────────────────────────────────
 
-function syntheticPerformanceScore(htmlBytes: number, loadMs: number): number {
-  // Rough score: penalise large pages and slow loads
-  const sizeScore = Math.max(0, 100 - Math.floor(htmlBytes / 10000) * 5);
-  const speedScore = Math.max(0, 100 - Math.floor(loadMs / 500) * 10);
-  return Math.round((sizeScore + speedScore) / 2);
+const CONTACT_PATHS = ['/contact', '/contact-us', '/contactus', '/about', '/about-us', '/aboutus', '/reach-us'];
+
+async function findContactPageUrl(baseUrl: string, pageHtml: string): Promise<string | null> {
+  // First try to find contact/about link in the HTML
+  const linkRegex = /href="([^"]*(?:contact|about|reach)[^"]*)"/gi;
+  const candidates: string[] = [];
+  let m: RegExpExecArray | null;
+  while ((m = linkRegex.exec(pageHtml)) !== null) {
+    const href = m[1];
+    if (href.startsWith('http') && !href.includes(new URL(baseUrl).hostname)) continue;
+    candidates.push(href);
+  }
+
+  // Try candidate links first, then fallback to known paths
+  const toTry = [
+    ...candidates.slice(0, 3),
+    ...CONTACT_PATHS,
+  ];
+
+  for (const path of toTry) {
+    try {
+      const full = path.startsWith('http') ? path : new URL(path, baseUrl).href;
+      return full;
+    } catch { /* invalid URL */ }
+  }
+  return null;
 }
 
-function syntheticSeoScore(html: string): number {
-  let score = 0;
-  if (/<title>/i.test(html)) score += 20;
-  if (/<meta[^>]*description/i.test(html)) score += 20;
-  if (/<h1/i.test(html)) score += 20;
-  if (/<meta[^>]*viewport/i.test(html)) score += 20;
-  if (/canonical/i.test(html)) score += 20;
-  return score;
+// ── Unreachable error detection ───────────────────────────────────────────────
+
+const UNREACHABLE_ERRORS = [
+  'ERR_NAME_NOT_RESOLVED', 'ERR_CONNECTION_REFUSED', 'ERR_CONNECTION_TIMED_OUT',
+  'net::ERR_', 'ECONNREFUSED', 'ENOTFOUND', 'ETIMEDOUT',
+];
+
+function isUnreachableError(message: string): boolean {
+  return UNREACHABLE_ERRORS.some(e => message.includes(e));
 }
 
-function syntheticQualityScore(html: string, techStack: string[], hasSSL: boolean): number {
-  let score = 0;
-  if (hasSSL) score += 20;
-  if (/<meta[^>]*viewport/i.test(html)) score += 15; // mobile
-  if (techStack.includes('Google Analytics')) score += 10;
-  if (html.length > 10000) score += 15; // content depth
-  if (/<img[^>]*alt=/i.test(html)) score += 10; // accessibility
-  if (techStack.length > 3) score += 10; // modern stack
-  if (/<script[^>]*defer/i.test(html)) score += 10; // performance-conscious
-  if (/<link[^>]*preload/i.test(html)) score += 10; // performance-conscious
-  return Math.min(100, score);
-}
-
-// ── Main enrich function ─────────────────────────────────────────────────────
+// ── Main enrichment function ─────────────────────────────────────────────────
 
 export async function enrichWebsite(domain: string, website?: string): Promise<EnrichmentResult> {
-  const url = website ?? `https://${domain}`;
-  const hasSSL = url.startsWith('https');
+  const urlsToTry = website
+    ? [website, `https://${domain}`, `http://${domain}`]
+    : [`https://${domain}`, `http://${domain}`];
+
+  // Deduplicate URLs
+  const uniqueUrls = [...new Set(urlsToTry)];
 
   let context: BrowserContext | null = null;
 
-  try {
-    const b = await getBrowser();
-    context = await b.newContext({
-      userAgent: 'Mozilla/5.0 (compatible; HydraFoxBot/3.0; +https://hydrafox.io/bot)',
-      viewport: { width: 1280, height: 800 },
-      javaScriptEnabled: true,
-      ignoreHTTPSErrors: true,
-    });
-
-    const page = await context.newPage();
-    const startMs = Date.now();
-
-    let finalStatus: EnrichmentResult['siteStatus'] = 'live';
-    const responseHeaders: Record<string, string> = {};
-
-    page.on('response', (response) => {
-      if (response.url() === url || response.url().startsWith(url.replace(/\/$/, ''))) {
-        const status = response.status();
-        if (status >= 400) finalStatus = 'error';
-        Object.assign(responseHeaders, response.headers());
-      }
-    });
-
+  for (const url of uniqueUrls) {
     try {
-      const response = await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 20000 });
-      if (response) {
-        const status = response.status();
-        if (status === 0 || status >= 500) finalStatus = 'unreachable';
-        else if (status >= 300 && status < 400) finalStatus = 'redirect';
+      const b = await getBrowser();
+      context = await b.newContext({
+        userAgent:
+          'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+        viewport: { width: 1280, height: 800 },
+        ignoreHTTPSErrors: true,
+      });
+
+      const page = await context.newPage();
+      let redirected = false;
+
+      page.on('response', response => {
+        if (response.url() !== url && [301, 302, 303, 307, 308].includes(response.status())) {
+          redirected = true;
+        }
+      });
+
+      await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 20000 });
+      // Let JS render briefly
+      await new Promise(r => setTimeout(r, 1500));
+
+      let html = await page.content();
+      const baseUrl = page.url(); // actual URL after redirects
+
+      // ── Multi-page scan for contact info ───────────────────────────────────
+      // Always scan a contact/about page to maximize email/phone extraction
+      const subPagesToScan: string[] = [];
+
+      // 1) Try to find contact link in the current page
+      const contactUrl = await findContactPageUrl(baseUrl, html);
+      if (contactUrl) subPagesToScan.push(contactUrl);
+
+      // 2) Always try common paths
+      for (const path of CONTACT_PATHS.slice(0, 3)) {
+        try {
+          subPagesToScan.push(new URL(path, baseUrl).href);
+        } catch { /* skip */ }
       }
-    } catch {
-      finalStatus = 'unreachable';
-    }
 
-    const loadMs = Date.now() - startMs;
+      // Scan up to 3 sub-pages
+      const visitedUrls = new Set<string>([baseUrl]);
+      for (const subUrl of [...new Set(subPagesToScan)].slice(0, 3)) {
+        if (visitedUrls.has(subUrl)) continue;
+        visitedUrls.add(subUrl);
+        try {
+          const subPage = await context.newPage();
+          await subPage.goto(subUrl, { waitUntil: 'domcontentloaded', timeout: 8000 });
+          await new Promise(r => setTimeout(r, 800));
+          html += '\n' + await subPage.content();
+          await subPage.close();
+          logger.debug('Enrichment: scanned sub-page', { subUrl });
+        } catch {
+          // Sub-page failure is non-fatal
+        }
+      }
 
-    if (finalStatus === 'unreachable') {
+      // ── Extract all data ───────────────────────────────────────────────────
+      const emails = extractEmails(html);
+      const phones = extractPhones(html);
+      const socials = extractSocials(html);
+      const quality = detectQuality(html);
+      const cms = detectCMS(html);
+      const { level: automationLevel, signals: automationSignals } = detectAutomation(html);
+      const techStack = detectTechStack(html);
+
+      const hasSSL = url.startsWith('https://') || baseUrl.startsWith('https://');
+      const mobileFriendly = /<meta[^>]*viewport/i.test(html);
+      const hasChatbot = /chatbot|livechat|intercom|drift|tawk|crisp/i.test(html);
+      const hasContactForm = /<form[^>]*>/i.test(html) && /contact|message|inquiry|enquiry/i.test(html);
+
+      await context.close();
+      context = null;
+
+      logger.info('Enrichment: complete', {
+        domain, emails: emails.length, phones: phones.length,
+        socials: socials.length, quality, cms,
+      });
+
       return {
-        techStack: [],
-        cms: 'unknown',
-        performanceScore: 0,
-        seoScore: 0,
-        siteQualityScore: 0,
-        mobileFriendly: false,
+        email: emails[0],
+        phone: phones[0],
+        socialLinks: socials,
+        websiteQuality: quality,
+        techStack,
+        cms,
+        automationLevel,
+        automationSignals,
+        siteStatus: redirected ? 'redirect' : 'live',
+        rawHtmlSnapshot: html.slice(0, 5000),
         hasSSL,
-        hasChatbot: false,
-        hasBookingSystem: false,
-        hasEcommerce: false,
-        hasContactForm: false,
-        automationLevel: 'none',
-        automationSignals: [],
-        socialActivity: 'unknown',
-        detectedPains: ['Site is unreachable'],
-        rawHtmlSnapshot: '',
-        siteStatus: 'unreachable',
+        hasChatbot,
+        hasContactForm,
+        mobileFriendly,
       };
+
+    } catch (err) {
+      const msg = (err as Error).message ?? '';
+      logger.warn('Enrichment attempt failed', { url, error: msg });
+
+      if (context) {
+        await context.close().catch(() => {});
+        context = null;
+      }
+
+      if (url === uniqueUrls[uniqueUrls.length - 1]) {
+        const siteStatus = isUnreachableError(msg) ? 'unreachable' : 'error';
+        logger.error('Enrichment failed — all URLs exhausted', { domain, siteStatus, error: msg });
+        return {
+          socialLinks: [],
+          websiteQuality: 'unknown',
+          techStack: [],
+          cms: 'unknown',
+          automationLevel: 'none',
+          automationSignals: [],
+          siteStatus,
+          rawHtmlSnapshot: '',
+          hasSSL: false,
+          hasChatbot: false,
+          hasContactForm: false,
+          mobileFriendly: false,
+        };
+      }
     }
-
-    const html = await page.content();
-    const rawHtmlSnapshot = html.slice(0, 5000);
-
-    const { techStack, cms } = detectTechStack(html, responseHeaders);
-    const hasChatbot = detectChatbot(html, techStack);
-    const hasBookingSystem = detectBookingSystem(html, techStack);
-    const hasContactForm = detectContactForm(html);
-    const hasEcommerce = detectEcommerce(html, techStack);
-    const { level: automationLevel, signals: automationSignals } = detectAutomationLevel(techStack);
-    const mobileFriendly = /<meta[^>]*viewport/i.test(html);
-    const detectedPains = detectPains(html, cms, automationLevel);
-
-    const performanceScore = syntheticPerformanceScore(html.length, loadMs);
-    const seoScore = syntheticSeoScore(html);
-    const siteQualityScore = syntheticQualityScore(html, techStack, hasSSL);
-
-    // Social activity: heuristic based on social links presence
-    const hasSocialLinks = /facebook\.com|instagram\.com|twitter\.com|linkedin\.com|tiktok\.com/i.test(html);
-    const socialActivity: EnrichmentResult['socialActivity'] = hasSocialLinks ? 'active' : 'unknown';
-
-    logger.debug('Enrichment complete', {
-      domain,
-      cms,
-      automationLevel,
-      performanceScore,
-      techCount: techStack.length,
-      loadMs,
-    });
-
-    return {
-      techStack,
-      cms,
-      performanceScore,
-      seoScore,
-      siteQualityScore,
-      mobileFriendly,
-      hasSSL,
-      hasChatbot,
-      hasBookingSystem,
-      hasEcommerce,
-      hasContactForm,
-      automationLevel,
-      automationSignals,
-      socialActivity,
-      detectedPains,
-      rawHtmlSnapshot,
-      siteStatus: finalStatus,
-    };
-  } catch (err) {
-    logger.error('EnrichmentService.enrichWebsite error', {
-      domain,
-      error: (err as Error).message,
-    });
-    return {
-      techStack: [],
-      cms: 'unknown',
-      performanceScore: 0,
-      seoScore: 0,
-      siteQualityScore: 0,
-      mobileFriendly: false,
-      hasSSL,
-      hasChatbot: false,
-      hasBookingSystem: false,
-      hasEcommerce: false,
-      hasContactForm: false,
-      automationLevel: 'none',
-      automationSignals: [],
-      socialActivity: 'unknown',
-      detectedPains: ['Enrichment failed — site could not be analysed'],
-      rawHtmlSnapshot: '',
-      siteStatus: 'error',
-    };
-  } finally {
-    await context?.close();
   }
+
+  // Fallback (should never reach)
+  return {
+    socialLinks: [],
+    websiteQuality: 'unknown',
+    techStack: [],
+    cms: 'unknown',
+    automationLevel: 'none',
+    automationSignals: [],
+    siteStatus: 'error',
+    rawHtmlSnapshot: '',
+    hasSSL: false,
+    hasChatbot: false,
+    hasContactForm: false,
+    mobileFriendly: false,
+  };
 }

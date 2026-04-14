@@ -1,25 +1,31 @@
 /**
- * guardedAICall — wraps EVERY Claude API call.
+ * guardedAICall — wraps EVERY AI API call.
  *
- * Responsibilities:
- *  1. Route to Sonnet (HOT leads / complex) vs Haiku (WARM batch / cheap)
- *  2. Check 4-layer cache before calling the API
- *  3. Log cost to CostLedger after every successful call
- *  4. Abort if daily budget is exceeded (reads from costGuard.worker)
- *  5. Catch and log API errors without crashing callers
+ * Routing rules:
+ *  - HOT leads  → gpt-4o        (OpenAI — best quality)
+ *  - WARM batch → deepseek-chat  (DeepSeek — very cheap, OpenAI-compatible)
  *
- * ALL Claude API calls in HydraFox MUST go through this function — no exceptions.
+ * Prompt text is loaded from DB (promptTemplates collection) — never hardcoded here.
  */
 
-import Anthropic from '@anthropic-ai/sdk';
+import OpenAI from 'openai';
 import { redis } from '../lib/redis';
 import { logger } from '../lib/logger';
 import { CostLedger, calculateCost, AIModel, AICallPurpose } from '../models/costLedger.model';
 
-const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+// OpenAI client — HOT leads
+const openaiClient = new OpenAI({
+  apiKey: process.env.OPENAI_API_KEY,
+});
 
-export const MODEL_SONNET: AIModel = 'claude-sonnet-4-20250514';
-export const MODEL_HAIKU: AIModel = 'claude-haiku-4-5-20251001';
+// DeepSeek client — WARM batch (OpenAI-compatible)
+const deepseekClient = new OpenAI({
+  apiKey: process.env.DEEPSEEK_API_KEY,
+  baseURL: 'https://api.deepseek.com',
+});
+
+export const MODEL_SONNET: AIModel = 'gpt-4o';
+export const MODEL_HAIKU: AIModel = 'deepseek-chat';
 
 // Daily spend ceiling loaded from env (default $5/day)
 const DAILY_BUDGET_USD = parseFloat(process.env.AI_DAILY_BUDGET_USD ?? '5');
@@ -74,9 +80,8 @@ async function recordCost(
 
   const key = COST_DAILY_KEY();
   await redis.incrbyfloat(key, costUSD);
-  await redis.expire(key, 3600 * 25); // keep for 25h so next day can read yesterday
+  await redis.expire(key, 3600 * 25);
 
-  // Persist to MongoDB asynchronously — don't block the caller
   CostLedger.create({
     aiModel: model,
     leadId: leadId ?? undefined,
@@ -94,7 +99,8 @@ async function recordCost(
 }
 
 /**
- * The one and only function that may call the Claude API in HydraFox.
+ * The one and only function that may call the AI API in HydraFox.
+ * Routes gpt-4o → OpenAI, deepseek-chat → DeepSeek.
  */
 export async function guardedAICall(opts: GuardedCallOptions): Promise<GuardedCallResult> {
   const {
@@ -114,7 +120,6 @@ export async function guardedAICall(opts: GuardedCallOptions): Promise<GuardedCa
     if (cached) {
       logger.debug('guardedAICall cache hit', { cacheKey: cacheKey.slice(0, 12), purpose });
       const parsed = JSON.parse(cached) as GuardedCallResult;
-      // Still record a zero-cost cache hit for audit trail
       await recordCost(model, purpose, 0, 0, true, leadId);
       return { ...parsed, cacheHit: true };
     }
@@ -124,28 +129,28 @@ export async function guardedAICall(opts: GuardedCallOptions): Promise<GuardedCa
   await assertBudgetOk();
 
   // ── 3. API call ───────────────────────────────────────────────────────────
-  logger.debug('guardedAICall → Claude API', { model, purpose, leadId });
+  const client = model === 'deepseek-chat' ? deepseekClient : openaiClient;
+  logger.debug('guardedAICall → AI API', { model, purpose, leadId });
 
-  let response: Anthropic.Message;
+  let response: OpenAI.Chat.ChatCompletion;
   try {
-    response = await client.messages.create({
+    response = await client.chat.completions.create({
       model,
       max_tokens: maxTokens,
-      system: systemPrompt,
-      messages: [{ role: 'user', content: userPrompt }],
+      messages: [
+        { role: 'system', content: systemPrompt },
+        { role: 'user', content: userPrompt },
+      ],
     });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    logger.error('Claude API call failed', { model, purpose, error: msg });
-    throw new Error(`CLAUDE_API_ERROR: ${msg}`);
+    logger.error('AI API call failed', { model, purpose, error: msg });
+    throw new Error(`AI_API_ERROR: ${msg}`);
   }
 
-  const inputTokens = response.usage.input_tokens;
-  const outputTokens = response.usage.output_tokens;
-  const content = response.content
-    .filter((b): b is Anthropic.TextBlock => b.type === 'text')
-    .map(b => b.text)
-    .join('');
+  const inputTokens  = response.usage?.prompt_tokens     ?? 0;
+  const outputTokens = response.usage?.completion_tokens ?? 0;
+  const content      = response.choices[0]?.message?.content ?? '';
 
   // ── 4. Record cost ────────────────────────────────────────────────────────
   const costUSD = await recordCost(model, purpose, inputTokens, outputTokens, false, leadId);

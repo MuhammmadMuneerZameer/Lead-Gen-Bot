@@ -16,14 +16,14 @@ const router = Router();
 const ListQuerySchema = z.object({
   page: z.coerce.number().int().min(1).default(1),
   limit: z.coerce.number().int().min(1).max(100).default(50),
-  priority: z.enum(['hot', 'warm', 'cold']).optional(),
+  opportunityLevel: z.enum(['high', 'medium', 'low']).optional(),
   status: z
     .enum(['new', 'enriched', 'reviewed', 'contacted', 'won', 'lost', 'archived'])
     .optional(),
   industry: z.string().optional(),
-  source: z.enum(['gmaps', 'linkedin', 'instagram', 'manual']).optional(),
+  source: z.enum(['gmaps', 'linkedin', 'instagram', 'manual', 'duckduckgo']).optional(),
   search: z.string().optional(),
-  sortBy: z.enum(['score', 'createdAt', 'enrichedAt']).default('createdAt'),
+  sortBy: z.enum(['opportunityScore', 'createdAt', 'enrichedAt']).default('createdAt'),
   sortDir: z.enum(['asc', 'desc']).default('desc'),
 });
 
@@ -59,10 +59,10 @@ const OutcomeSchema = z.object({
 router.get('/', authenticate, validate(ListQuerySchema, 'query'), async (req: Request, res: Response) => {
   try {
     const q = req.query as unknown as z.infer<typeof ListQuerySchema>;
-    const { page, limit, priority, status, industry, source, search, sortBy, sortDir } = q;
+    const { page, limit, opportunityLevel, status, industry, source, search, sortBy, sortDir } = q;
 
     const filter: Record<string, unknown> = {};
-    if (priority) filter.priority = priority;
+    if (opportunityLevel) filter.opportunityLevel = opportunityLevel;
     if (status) filter.status = status;
     if (industry) filter.industry = new RegExp(industry, 'i');
     if (source) filter.source = source;
@@ -157,8 +157,8 @@ router.post('/:id/outcome', authenticate, validate(OutcomeSchema), async (req: R
 
     const outcomeLog = await OutcomeLog.create({
       leadId: lead._id,
-      predictedScore: lead.score,
-      predictedPriority: lead.priority,
+      predictedScore: lead.opportunityScore,
+      predictedPriority: lead.opportunityLevel,
       actualOutcome: body.actualOutcome,
       replyQuality: body.replyQuality,
       dealValue: body.dealValue,
@@ -210,13 +210,13 @@ router.post('/:id/rescore', authenticate, async (req: Request, res: Response) =>
       enrichment,
     });
 
-    lead.score = result.score;
-    lead.priority = result.priority;
+    lead.opportunityScore = result.score;
+    lead.opportunityLevel = result.priority;
     lead.scoreBreakdown = result.scoreBreakdown;
     lead.scoringConfigVersion = result.configVersion;
     await lead.save();
 
-    res.json({ score: result.score, priority: result.priority, scoreBreakdown: result.scoreBreakdown });
+    res.json({ opportunityScore: result.score, opportunityLevel: result.priority, scoreBreakdown: result.scoreBreakdown });
   } catch (err) {
     logger.error('POST /leads/:id/rescore error', { error: (err as Error).message });
     res.status(500).json({ error: 'INTERNAL_ERROR' });

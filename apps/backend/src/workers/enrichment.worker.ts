@@ -35,31 +35,66 @@ export const enrichmentWorker = new Worker<EnrichJobData>(
     const result = await enrichWebsite(domain, website ?? lead.website);
 
     const enrichmentPayload = {
-      leadId,
-      ...result,
+      leadId: lead._id,
+      phone: result.phone,
+      email: result.email,
+      socialLinks: result.socialLinks,
+      websiteQuality: result.websiteQuality,
+      techStack: result.techStack,
+      cms: result.cms,
+      automationLevel: result.automationLevel,
+      automationSignals: result.automationSignals,
+      siteStatus: result.siteStatus,
+      rawHtmlSnapshot: result.rawHtmlSnapshot,
+      hasSSL: result.hasSSL,
+      hasChatbot: result.hasChatbot,
+      hasContactForm: result.hasContactForm,
+      mobileFriendly: result.mobileFriendly,
       enrichedAt: new Date(),
     };
 
-    const existing = await Enrichment.findOne({ leadId });
+    const existing = await Enrichment.findOne({ leadId: lead._id });
     if (existing) {
       await Enrichment.findByIdAndUpdate(existing._id, enrichmentPayload);
     } else {
       await Enrichment.create(enrichmentPayload);
     }
 
-    lead.status = result.siteStatus === 'unreachable' ? 'archived' : 'enriched';
+    // Sync vital signals to Lead model for fast scoring/access
+    if (result.email) lead.email = result.email;
+    if (result.phone) lead.phone = result.phone;
+    lead.socialLinks = result.socialLinks || [];
+    lead.websiteQuality = result.websiteQuality;
     lead.enrichedAt = new Date();
-    await lead.save();
 
+    // Determine lead status based on site reachability
     if (result.siteStatus === 'unreachable') {
+      lead.status = 'archived';
+      await lead.save();
       logger.warn('Lead archived — site unreachable', { leadId, domain });
       return { enriched: false, archived: true };
     }
 
+    // For live, redirect, or error status — mark as enriched and score
+    lead.status = 'enriched';
+    await lead.save();
+
     // ── Enqueue for scoring ──────────────────────────────────────────────────
     await scoringQueue.add('score', { leadId, domain }, { priority: 4 });
-    logger.info('Enrichment job complete', { jobId: job.id, leadId, cms: result.cms, automationLevel: result.automationLevel });
-    return { enriched: true, cms: result.cms, automationLevel: result.automationLevel };
+    logger.info('Enrichment job complete', {
+      jobId: job.id,
+      leadId,
+      cms: result.cms,
+      automationLevel: result.automationLevel,
+      siteStatus: result.siteStatus,
+    });
+
+    return {
+      enriched: true,
+      cms: result.cms,
+      automationLevel: result.automationLevel,
+      siteStatus: result.siteStatus,
+    };
   },
   {
     connection: redis,

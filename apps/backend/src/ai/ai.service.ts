@@ -185,7 +185,7 @@ Same array length as input, same order. Raw JSON array only — no markdown, no 
    * Uses Sonnet for HOT, Haiku for WARM.
    */
   async generateOutreach(
-    lead: Pick<ILead, '_id' | 'businessName' | 'domain' | 'industry' | 'priority'>,
+    lead: Pick<ILead, '_id' | 'businessName' | 'domain' | 'industry' | 'opportunityLevel'>,
     analysis: Pick<LeadAnalysisResult, 'primaryPain' | 'pitchAngle'>,
     channel: 'email' | 'linkedin',
   ): Promise<OutreachResult> {
@@ -197,14 +197,14 @@ Same array length as input, same order. Raw JSON array only — no markdown, no 
       domain: lead.domain,
       industry: lead.industry ?? 'unknown',
       primaryPain: analysis.primaryPain,
-      pitchAngle: analysis.pitchAngle,
+      pitchAngle: analysis.pitchAngle ?? 'digital transformation opportunity',
     });
 
     const systemPrompt = channel === 'email'
       ? `You are an expert B2B cold email copywriter. Write a short, personalised cold email. Return JSON with keys: subject (string), body (string). Raw JSON only.`
       : `You are an expert LinkedIn outreach copywriter. Write a short personalised connection request note (max 300 chars). Return JSON with key: body (string). Raw JSON only.`;
 
-    const model = lead.priority === 'hot' ? MODEL_SONNET : MODEL_HAIKU;
+    const model = lead.opportunityLevel === 'high' ? MODEL_SONNET : MODEL_HAIKU;
 
     const cacheKey = buildCacheKey(
       `outreach_${channel}`,

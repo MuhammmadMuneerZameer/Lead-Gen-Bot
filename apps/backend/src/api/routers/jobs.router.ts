@@ -154,21 +154,44 @@ router.post('/:queue/drain', authenticate, async (req: Request, res: Response) =
 
 router.post('/scrape', authenticate, async (req: Request, res: Response) => {
   try {
-    const { source = 'gmaps', query, location, maxResults = 20 } = req.body as {
+    const {
+      source,
+      sources,
+      query,
+      location,
+      maxResults = 20,
+      autoExpand = false,
+    } = req.body as {
       source?: string;
+      sources?: string[];
       query: string;
       location?: string;
       maxResults?: number;
+      autoExpand?: boolean;
     };
 
-    if (!query) {
+    if (!query || typeof query !== 'string' || !query.trim()) {
       res.status(400).json({ error: 'VALIDATION_ERROR', message: 'query is required' });
       return;
     }
 
-    const job = await scrapingQueue.add('scrape', { source, query, location, maxResults });
-    logger.info('Manual scrape job enqueued', { jobId: job.id, source, query });
-    res.status(202).json({ jobId: job.id, status: 'queued' });
+    // Resolve sources — prefer `sources[]`, fall back to `source`, default to gmaps
+    const resolvedSources: string[] = sources?.length
+      ? sources
+      : source
+      ? [source]
+      : ['gmaps'];
+
+    const job = await scrapingQueue.add('scrape', {
+      sources: resolvedSources,
+      query: query.trim(),
+      location: location?.trim() || undefined,
+      maxResults,
+      autoExpand,
+    });
+
+    logger.info('Manual scrape job enqueued', { jobId: job.id, sources: resolvedSources, query });
+    res.status(202).json({ jobId: job.id, status: 'queued', sources: resolvedSources });
   } catch (err) {
     logger.error('POST /jobs/scrape error', { error: (err as Error).message });
     res.status(500).json({ error: 'INTERNAL_ERROR' });

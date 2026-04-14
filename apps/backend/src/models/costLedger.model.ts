@@ -1,6 +1,6 @@
 import mongoose, { Document, Schema, Types } from 'mongoose';
 
-export type AIModel = 'claude-sonnet-4-20250514' | 'claude-haiku-4-5-20251001';
+export type AIModel = 'gpt-4o' | 'deepseek-chat';
 export type AICallPurpose = 'lead_analysis' | 'outreach_gen' | 'batch_analysis' | 'prompt_optimization';
 
 export interface ICostLedger extends Document {
@@ -16,8 +16,8 @@ export interface ICostLedger extends Document {
 
 // Pricing per token (as of 2025)
 export const MODEL_PRICING: Record<AIModel, { in: number; out: number }> = {
-  'claude-sonnet-4-20250514': { in: 0.000003, out: 0.000015 },
-  'claude-haiku-4-5-20251001': { in: 0.00000025, out: 0.00000125 },
+  'gpt-4o':        { in: 0.0000025,  out: 0.00001   }, // $2.50 / $10 per 1M tokens
+  'deepseek-chat': { in: 0.00000027, out: 0.0000011  }, // $0.27 / $1.10 per 1M tokens
 };
 
 export function calculateCost(
@@ -35,7 +35,7 @@ const CostLedgerSchema = new Schema<ICostLedger>(
   {
     aiModel: {
       type: String,
-      enum: ['claude-sonnet-4-20250514', 'claude-haiku-4-5-20251001'],
+      enum: ['gpt-4o', 'deepseek-chat'],
       required: true,
     },
     leadId: { type: Schema.Types.ObjectId, ref: 'Lead' }, // nullable for batch calls

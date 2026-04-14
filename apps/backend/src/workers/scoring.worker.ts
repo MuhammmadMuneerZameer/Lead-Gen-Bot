@@ -46,8 +46,8 @@ export const scoringWorker = new Worker<ScoringJobData>(
       enrichment,
     });
 
-    lead.score = result.score;
-    lead.priority = result.priority;
+    lead.opportunityScore = result.score;
+    lead.opportunityLevel = result.priority as 'high' | 'medium' | 'low';
     lead.scoreBreakdown = result.scoreBreakdown;
     lead.scoringConfigVersion = result.configVersion;
     await lead.save();
@@ -55,11 +55,11 @@ export const scoringWorker = new Worker<ScoringJobData>(
     logger.info('Lead scored', {
       leadId,
       score: result.score,
-      priority: result.priority,
+      level: result.priority,
     });
 
-    // HOT leads get immediate AI analysis via guardedAICall
-    if (result.priority === 'hot') {
+    // HIGH opportunity leads get immediate AI analysis
+    if (result.priority === 'high') {
       try {
         const analysis = await aiService.analyseHotLead(
           { _id: lead._id, businessName: lead.businessName, domain: lead.domain, industry: lead.industry },
@@ -87,17 +87,16 @@ export const scoringWorker = new Worker<ScoringJobData>(
         lead.confidenceScore = analysis.confidenceScore;
         await lead.save();
 
-        logger.info('HOT lead AI analysis complete', { leadId, primaryPain: analysis.primaryPain });
+        logger.info('HIGH opportunity AI analysis complete', { leadId, primaryPain: analysis.primaryPain });
       } catch (err) {
-        // Don't fail the whole job if AI analysis errors — log and continue
-        logger.error('HOT lead AI analysis failed', {
+        logger.error('HIGH opportunity AI analysis failed', {
           leadId,
           error: (err as Error).message,
         });
       }
     }
 
-    return { score: result.score, priority: result.priority };
+    return { score: result.score, level: result.priority };
   },
   {
     connection: redis,

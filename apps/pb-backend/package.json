@@ -1,0 +1,24 @@
+{
+  "name": "@hydrafox/pb-backend",
+  "version": "1.0.0",
+  "private": true,
+  "main": "src/worker.ts",
+  "scripts": {
+    "dev": "tsx src/worker.ts",
+    "start": "node dist/worker.js"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.5",
+    "eventsource": "^4.1.0",
+    "openai": "^4.104.0",
+    "playwright-core": "^1.59.1",
+    "pocketbase": "^0.21.3",
+    "winston": "^3.17.0",
+    "zod": "^3.25.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "tsx": "^4.19.0",
+    "typescript": "~5.8.3"
+  }
+}

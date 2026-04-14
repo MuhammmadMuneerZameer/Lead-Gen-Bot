@@ -45,3 +45,7 @@ Thumbs.db
 
 # Misc
 .turbo/
+
+# PocketBase
+pocketbase/pb_data/
+*.exe

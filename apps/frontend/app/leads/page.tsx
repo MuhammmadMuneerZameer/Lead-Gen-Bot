@@ -2,7 +2,7 @@
 
 import { useEffect, useState, useCallback, Suspense } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
-import { leads, getToken, type Lead, type LeadFilters } from '../lib/api';
+import { leads, getToken, subscribeLeads, type Lead, type LeadFilters } from '../lib/api';
 import AppShell from '../components/AppShell';
 
 const OPP_COLOR: Record<string, string> = {
@@ -362,6 +362,23 @@ function LeadsList() {
 
   useEffect(() => { setIsMounted(true); }, []);
   useEffect(() => { if (isMounted) fetchLeads(); }, [isMounted, fetchLeads]);
+
+  // Handle Real-time Subscriptions
+  useEffect(() => {
+    if (!isMounted) return;
+    const unsubscribe = subscribeLeads((newLead) => {
+      setLeadsData(prev => {
+        const index = prev.findIndex(l => l._id === newLead._id);
+        if (index > -1) {
+          const next = [...prev];
+          next[index] = newLead;
+          return next;
+        }
+        return [newLead, ...prev];
+      });
+    });
+    return () => { unsubscribe(); };
+  }, [isMounted]);
 
   async function openDetail(lead: Lead) {
     setDetailLead(lead);

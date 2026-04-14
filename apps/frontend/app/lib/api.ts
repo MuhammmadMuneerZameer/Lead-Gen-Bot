@@ -1,113 +1,64 @@
+import { pb } from '../../lib/pocketbase';
+
 /**
- * API client — all fetch calls to the HydraFox backend.
- * Reads the token from localStorage, attaches it as Bearer.
- * On 401 → clears token and redirects to /login.
+ * PocketBase Facade — Mimics the old HydraFox Express API
+ * to maintain frontend compatibility during migration.
  */
 
-const BASE = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:3001';
-
 export function getToken(): string | null {
-  if (typeof window === 'undefined') return null;
-  return localStorage.getItem('hf_token');
+  return pb.authStore.token;
 }
 
 export function setToken(token: string): void {
-  localStorage.setItem('hf_token', token);
+  // Not needed — PB handles this via authStore
 }
 
 export function clearToken(): void {
-  localStorage.removeItem('hf_token');
-  localStorage.removeItem('hf_user');
+  pb.authStore.clear();
 }
 
 export function getUser(): Record<string, unknown> | null {
-  if (typeof window === 'undefined') return null;
-  const raw = localStorage.getItem('hf_user');
-  return raw ? (JSON.parse(raw) as Record<string, unknown>) : null;
+  return pb.authStore.model as Record<string, unknown> | null;
 }
 
-export function setUser(user: Record<string, unknown>): void {
-  localStorage.setItem('hf_user', JSON.stringify(user));
-}
-
-class ApiError extends Error {
-  status: number;
-  constructor(message: string, status: number) {
-    super(message);
-    this.status = status;
+export function setUser(user: Record<string, unknown> | null): void {
+  // PB handles this automatically on authWithPassword, 
+  // but we add this for legacy support in login components
+  if (user) {
+    pb.authStore.save(pb.authStore.token, user as any);
+  } else {
+    pb.authStore.clear();
   }
 }
 
-async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
-  const token = getToken();
-  const headers: Record<string, string> = {
-    'Content-Type': 'application/json',
-    ...(options.headers as Record<string, string>),
+// ── Transformers ─────────────────────────────────────────────────────────────
+
+/**
+ * Maps PocketBase record to the old "Lead" interface
+ */
+function toLead(record: any): Lead {
+  return {
+    _id: record.id,
+    businessName: record.business_name,
+    domain: record.domain,
+    website: record.website,
+    phone: record.phone,
+    email: record.email,
+    socialLinks: record.social_links || [],
+    websiteQuality: record.website_quality || 'unknown',
+    industry: record.industry,
+    industryTier: record.industry_tier || 2,
+    opportunityScore: record.score || 0,
+    opportunityLevel: record.opportunity_level || 'low',
+    scoreBreakdown: record.score_breakdown || {},
+    status: record.status || 'new',
+    source: record.source || 'unknown',
+    tags: record.tags || [],
+    createdAt: record.created,
   };
-  if (token) headers['Authorization'] = `Bearer ${token}`;
-
-  const res = await fetch(`${BASE}${path}`, { ...options, headers });
-
-  if (res.status === 401) {
-    clearToken();
-    if (typeof window !== 'undefined') window.location.href = '/login';
-    throw new ApiError('Unauthorized', 401);
-  }
-
-  const data: unknown = await res.json().catch(() => ({}));
-
-  if (!res.ok) {
-    const msg = (data as { message?: string; error?: string })?.message
-      ?? (data as { error?: string })?.error
-      ?? `HTTP ${res.status}`;
-    throw new ApiError(msg, res.status);
-  }
-
-  return data as T;
 }
 
-// ── Auth ─────────────────────────────────────────────────────────────────────
-
-export const auth = {
-  login: (email: string, password: string) =>
-    request<{ accessToken: string; refreshToken: string; user: Record<string, unknown> }>(
-      '/api/auth/login', { method: 'POST', body: JSON.stringify({ email, password }) },
-    ),
-  me: () => request<Record<string, unknown>>('/api/auth/me'),
-};
-
-// ── Analytics ────────────────────────────────────────────────────────────────
-
-export interface DashboardData {
-  kpis: {
-    leadsToday: number;
-    hotQueue: number;
-    warmQueue: number;
-    coldQueue: number;
-    enrichedToday: number;
-    contactedLast7d: number;
-    wonLast30d: number;
-    totalLeads: number;
-    aiCostToday: number;
-  };
-  queues: {
-    scraping: Record<string, number>;
-    enrichment: Record<string, number>;
-    scoring: Record<string, number>;
-  };
-  scoreDistribution: Array<{ _id: string | number; count: number }>;
-}
-
-export const analytics = {
-  dashboard: () => request<DashboardData>('/api/analytics/dashboard'),
-  pipeline: (days = 30) => request<{ days: number; data: unknown[] }>(`/api/analytics/pipeline?days=${days}`),
-  costs: (days = 14) => request<unknown>(`/api/analytics/costs?days=${days}`),
-  outcomes: (days = 30) => request<unknown>(`/api/analytics/outcomes?days=${days}`),
-  industries: () => request<{ data: unknown[] }>('/api/analytics/industries'),
-  selfImprove: () => request<{ data: unknown[] }>('/api/analytics/self-improve'),
-};
-
-// ── Leads ────────────────────────────────────────────────────────────────────
+// ── Types ────────────────────────────────────────────────────────────────────
 
 export interface Lead {
   _id: string;
@@ -130,11 +81,6 @@ export interface Lead {
   enrichedAt?: string;
 }
 
-export interface LeadListResponse {
-  data: Lead[];
-  pagination: { page: number; limit: number; total: number; pages: number };
-}
-
 export interface LeadFilters {
   page?: number;
   limit?: number;
@@ -146,61 +92,133 @@ export interface LeadFilters {
   sortDir?: string;
 }
 
-export interface ScoringConfig {
-  version: number;
-  weights: Record<string, number>;
-  notes?: string;
+export interface LeadListResponse {
+  data: Lead[];
+  pagination: { page: number; limit: number; total: number; pages: number };
 }
 
-export const leads = {
-  list: (filters: LeadFilters = {}) => {
-    const params = new URLSearchParams();
-    Object.entries(filters).forEach(([k, v]) => v != null && params.set(k, String(v)));
-    return request<LeadListResponse>(`/api/leads?${params}`);
+// ── Auth ─────────────────────────────────────────────────────────────────────
+
+export const auth = {
+  login: async (email: string, password: string) => {
+    const authData = await pb.collection('users').authWithPassword(email, password);
+    return {
+      accessToken: pb.authStore.token,
+      refreshToken: '', // PB doesn't use refresh tokens like JWT
+      user: authData.record as unknown as Record<string, unknown>,
+    };
   },
-  get: (id: string) => request<{ lead: Lead; enrichment: unknown }>(`/api/leads/${id}`),
-  create: (data: { businessName: string; domain: string; website?: string; industry?: string }) =>
-    request<{ lead: Lead; isNew: boolean }>('/api/leads', { method: 'POST', body: JSON.stringify(data) }),
-  updateStatus: (id: string, status: string) =>
-    request<{ lead: Lead }>(`/api/leads/${id}/status`, { method: 'PATCH', body: JSON.stringify({ status }) }),
-  logOutcome: (
-    id: string,
-    data: { actualOutcome: string; replyQuality?: string; channelUsed: string; dealValue?: number },
-  ) =>
-    request<unknown>(`/api/leads/${id}/outcome`, { method: 'POST', body: JSON.stringify(data) }),
-  rescore: (id: string) =>
-    request<{ score: number; priority: string }>(`/api/leads/${id}/rescore`, { method: 'POST' }),
+  me: async () => {
+    return pb.authStore.model as unknown as Record<string, unknown>;
+  },
+};
+
+// ── Leads ────────────────────────────────────────────────────────────────────
+
+export const leads = {
+  list: async (filters: LeadFilters = {}) => {
+    const page = filters.page || 1;
+    const limit = filters.limit || 50;
+    
+    // Sort logic mapping
+    let sort = '-created';
+    if (filters.sortBy) {
+      const fieldMapping: Record<string, string> = {
+        opportunityScore: 'score',
+        createdAt: 'created',
+        businessName: 'business_name'
+      };
+      const field = fieldMapping[filters.sortBy] || filters.sortBy;
+      sort = filters.sortDir === 'asc' ? field : `-${field}`;
+    }
+
+    // Filter logic mapping
+    const pbFilters: string[] = [];
+    if (filters.opportunityLevel) pbFilters.push(`opportunity_level = "${filters.opportunityLevel}"`);
+    if (filters.status) pbFilters.push(`status = "${filters.status}"`);
+    if (filters.search) pbFilters.push(`(business_name ~ "${filters.search}" || domain ~ "${filters.search}")`);
+
+    const result = await pb.collection('leads').getList(page, limit, {
+      sort,
+      filter: pbFilters.join(' && ')
+    });
+
+    return {
+      data: result.items.map(toLead),
+      pagination: {
+        page: result.page,
+        limit: result.perPage,
+        total: result.totalItems,
+        pages: result.totalPages
+      }
+    };
+  },
+
+  get: async (id: string) => {
+    const lead = await pb.collection('leads').getOne(id);
+    return {
+      lead: toLead(lead),
+      enrichment: lead.score_breakdown || {} // PocketBase doesn't separate these like Mongo anymore
+    };
+  },
+
+  create: async (data: { businessName: string; domain: string; website?: string; industry?: string }) => {
+    const record = await pb.collection('leads').create({
+      business_name: data.businessName,
+      domain: data.domain,
+      website: data.website,
+      industry: data.industry,
+      status: 'new'
+    });
+    return { lead: toLead(record), isNew: true };
+  },
+
+  updateStatus: async (id: string, status: string) => {
+    const record = await pb.collection('leads').update(id, { status });
+    return { lead: toLead(record) };
+  },
+
+  logOutcome: async (id: string, data: any) => {
+    // Optionally create an outcome record in a new collection or update lead
+    return await pb.collection('leads').update(id, { 
+      logs: { ...(data || {}), timestamp: new Date() } 
+    });
+  },
+
+  rescore: async (id: string) => {
+    // This now triggers a job in PB
+    const job = await pb.collection('jobs').create({
+      type: 'scoring',
+      status: 'pending',
+      payload: { leadId: id }
+    });
+    return { jobId: job.id };
+  }
 };
 
 // ── Jobs ─────────────────────────────────────────────────────────────────────
 
-export interface QueueStats {
-  stats: {
-    scraping: Record<string, number>;
-    enrichment: Record<string, number>;
-    scoring: Record<string, number>;
-  };
-  paused: Record<string, boolean>;
-}
-
 export const jobs = {
-  stats: () => request<QueueStats>('/api/jobs'),
-  pause: (queue: string) => request<unknown>(`/api/jobs/${queue}/pause`, { method: 'POST' }),
-  resume: (queue: string) => request<unknown>(`/api/jobs/${queue}/resume`, { method: 'POST' }),
-  enqueueScrape: (query: string, sources: string[] = ['gmaps'], location?: string, autoExpand = false) =>
-    request<{ jobId: string; sources: string[] }>('/api/jobs/scrape', {
-      method: 'POST',
-      body: JSON.stringify({ query, sources, location, autoExpand }),
-    }),
+  enqueueScrape: async (query: string, sources: string[] = ['gmaps'], location?: string, autoExpand = false) => {
+    const job = await pb.collection('jobs').create({
+      type: 'scraper',
+      status: 'pending',
+      payload: { query, sources, location, autoExpand }
+    });
+    return { jobId: job.id };
+  },
+  
+  // Stats and other legacy calls can return empty or mock data if not implemented yet
+  stats: async () => ({ stats: { scraping: {}, enrichment: {}, scoring: {} }, paused: {} })
 };
 
-// ── Settings ─────────────────────────────────────────────────────────────────
+// ── Subscriptions ────────────────────────────────────────────────────────────
 
-export const settings = {
-  activeScoringConfig: () => request<Record<string, unknown>>('/api/settings/scoring/active'),
-  allScoringConfigs: () => request<{ data: unknown[] }>('/api/settings/scoring'),
-  updateWeights: (weights: Record<string, number>, reason?: string) =>
-    request<unknown>('/api/settings/scoring', { method: 'POST', body: JSON.stringify({ weights, reason }) }),
-  prompts: (type?: string) =>
-    request<{ data: unknown[] }>(`/api/settings/prompts${type ? `?type=${type}` : ''}`),
+export const subscribeLeads = (callback: (data: Lead) => void) => {
+  pb.collection('leads').subscribe('*', (e) => {
+    if (e.action === 'create' || e.action === 'update') {
+      callback(toLead(e.record));
+    }
+  });
+  return () => pb.collection('leads').unsubscribe('*');
 };

@@ -1,9 +1,11 @@
 import { Request, Response, NextFunction } from 'express';
 import jwt from 'jsonwebtoken';
 import { logger } from '../lib/logger';
+import { User } from '../models/user.model';
 
 export interface JWTPayload {
   userId: string;
+  role?: string;
   iat?: number;
   exp?: number;
 }
@@ -54,4 +56,19 @@ export function generateTokens(userId: string): { accessToken: string; refreshTo
 export function verifyRefreshToken(token: string): JWTPayload {
   const secret = process.env.JWT_REFRESH_SECRET!;
   return jwt.verify(token, secret) as JWTPayload;
+}
+
+export function requireRole(...roles: string[]) {
+  return async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+    if (!req.user?.userId) {
+      res.status(401).json({ error: 'UNAUTHORIZED' });
+      return;
+    }
+    const user = await User.findById(req.user.userId).select('role').lean();
+    if (!user || !roles.includes(user.role as string)) {
+      res.status(403).json({ error: 'FORBIDDEN', message: `Requires role: ${roles.join(' or ')}` });
+      return;
+    }
+    next();
+  };
 }

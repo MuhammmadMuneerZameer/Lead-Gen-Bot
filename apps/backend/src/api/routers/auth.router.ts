@@ -2,6 +2,7 @@ import { Router, Request, Response } from 'express';
 import { z } from 'zod';
 import { validate } from '../../middleware/validate.middleware';
 import { authenticate, generateTokens, verifyRefreshToken } from '../../middleware/auth.middleware';
+import { authLimiter } from '../../middleware/rateLimit.middleware';
 import { User, hashPassword } from '../../models/user.model';
 import { logger } from '../../lib/logger';
 
@@ -54,7 +55,7 @@ router.post('/register', validate(RegisterSchema), async (req: Request, res: Res
 
 // ── POST /api/auth/login ────────────────────────────────────────────────────
 
-router.post('/login', validate(LoginSchema), async (req: Request, res: Response) => {
+router.post('/login', authLimiter, validate(LoginSchema), async (req: Request, res: Response) => {
   try {
     const { email, password } = req.body as z.infer<typeof LoginSchema>;
 

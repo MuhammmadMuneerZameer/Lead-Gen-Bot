@@ -204,3 +204,64 @@ export const settings = {
   prompts: (type?: string) =>
     request<{ data: unknown[] }>(`/api/settings/prompts${type ? `?type=${type}` : ''}`),
 };
+
+// ── Campaigns ─────────────────────────────────────────────────────────────────
+
+export interface Campaign {
+  _id: string;
+  name: string;
+  description?: string;
+  channel: string;
+  status: string;
+  targetIndustries: string[];
+  targetPriorities: string[];
+  dailyLimit: number;
+  stats: { totalSent: number; totalReplied: number; totalConverted: number; replyRate: number; conversionRate: number };
+  createdAt: string;
+  startedAt?: string;
+  completedAt?: string;
+}
+
+export const campaigns = {
+  list: (status?: string) =>
+    request<{ data: Campaign[] }>(`/api/campaigns${status ? `?status=${status}` : ''}`),
+  get: (id: string) => request<{ campaign: Campaign; recentOutreach: unknown[] }>(`/api/campaigns/${id}`),
+  create: (data: { name: string; channel: string; targetIndustries?: string[]; targetPriorities?: string[]; dailyLimit?: number; description?: string }) =>
+    request<{ campaign: Campaign }>('/api/campaigns', { method: 'POST', body: JSON.stringify(data) }),
+  update: (id: string, data: Partial<Campaign>) =>
+    request<{ campaign: Campaign }>(`/api/campaigns/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
+  updateStatus: (id: string, status: string) =>
+    request<{ campaign: Campaign }>(`/api/campaigns/${id}/status`, { method: 'PATCH', body: JSON.stringify({ status }) }),
+  delete: (id: string) => request<unknown>(`/api/campaigns/${id}`, { method: 'DELETE' }),
+};
+
+// ── Outreach ──────────────────────────────────────────────────────────────────
+
+export interface OutreachLog {
+  _id: string;
+  leadId: { _id: string; businessName: string; domain: string; priority: string; score: number } | string;
+  channel: string;
+  messageSent: string;
+  status: string;
+  sentAt?: string;
+  openedAt?: string;
+  repliedAt?: string;
+  response?: string;
+  followUpDate?: string;
+  createdAt: string;
+}
+
+export const outreach = {
+  list: (params?: { page?: number; limit?: number; status?: string; channel?: string; leadId?: string }) => {
+    const p = new URLSearchParams();
+    if (params) Object.entries(params).forEach(([k, v]) => v != null && p.set(k, String(v)));
+    return request<{ data: OutreachLog[]; pagination: { page: number; limit: number; total: number; pages: number } }>(`/api/outreach?${p}`);
+  },
+  pendingFollowups: () => request<{ data: OutreachLog[]; count: number }>('/api/outreach/pending-followups'),
+  get: (id: string) => request<{ outreach: OutreachLog }>(`/api/outreach/${id}`),
+  create: (data: { leadId: string; channel: string; messageSent: string; promptTemplateId?: string; followUpDate?: string }) =>
+    request<{ outreach: OutreachLog }>('/api/outreach', { method: 'POST', body: JSON.stringify(data) }),
+  updateStatus: (id: string, status: string, response?: string) =>
+    request<{ outreach: OutreachLog }>(`/api/outreach/${id}/status`, { method: 'PATCH', body: JSON.stringify({ status, response }) }),
+  delete: (id: string) => request<unknown>(`/api/outreach/${id}`, { method: 'DELETE' }),
+};

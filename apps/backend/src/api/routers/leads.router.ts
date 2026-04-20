@@ -67,9 +67,10 @@ router.get('/', authenticate, validate(ListQuerySchema, 'query'), async (req: Re
     if (industry) filter.industry = new RegExp(industry, 'i');
     if (source) filter.source = source;
     if (search) {
+      const escaped = search.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
       filter.$or = [
-        { businessName: new RegExp(search, 'i') },
-        { domain: new RegExp(search, 'i') },
+        { businessName: new RegExp(escaped, 'i') },
+        { domain: new RegExp(escaped, 'i') },
       ];
     }
 
@@ -175,7 +176,13 @@ router.post('/:id/outcome', authenticate, validate(OutcomeSchema), async (req: R
       replied: 'contacted',
       interested: 'contacted',
       converted: 'won',
+      won: 'won',
       bounced: 'archived',
+      lost: 'lost',
+      no_reply: 'contacted',
+      unsubscribed: 'archived',
+      objected: 'contacted',
+      ignored: 'contacted',
     };
     const newStatus = statusMap[body.actualOutcome];
     if (newStatus) {

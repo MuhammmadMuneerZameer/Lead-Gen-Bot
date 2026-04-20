@@ -12,6 +12,7 @@ import leadsRouter from './api/routers/leads.router';
 import jobsRouter from './api/routers/jobs.router';
 import analyticsRouter from './api/routers/analytics.router';
 import settingsRouter from './api/routers/settings.router';
+import outreachRouter from './api/routers/outreach.router';
 import { startWorkers } from './workers';
 import { runSeed } from './seed';
 
@@ -30,6 +31,7 @@ app.use('/api/leads', leadsRouter);
 app.use('/api/jobs', jobsRouter);
 app.use('/api/analytics', analyticsRouter);
 app.use('/api/settings', settingsRouter);
+app.use('/api/outreach', outreachRouter);
 
 app.get('/health', (_req, res) => {
   res.json({

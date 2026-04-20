@@ -4,7 +4,7 @@
  */
 import { Router, Request, Response } from 'express';
 import { Queue, JobType } from 'bullmq';
-import { authenticate } from '../../middleware/auth.middleware';
+import { authenticate, requireRole } from '../../middleware/auth.middleware';
 import {
   scrapingQueue,
   enrichmentQueue,
@@ -95,7 +95,7 @@ router.get('/:queue/jobs', authenticate, async (req: Request, res: Response) => 
 
 // ── POST /api/jobs/:queue/pause ──────────────────────────────────────────────
 
-router.post('/:queue/pause', authenticate, async (req: Request, res: Response) => {
+router.post('/:queue/pause', authenticate, requireRole('admin', 'operator'), async (req: Request, res: Response) => {
   try {
     const queueName = param(req, 'queue');
     const q = QUEUES[queueName];
@@ -114,7 +114,7 @@ router.post('/:queue/pause', authenticate, async (req: Request, res: Response) =
 
 // ── POST /api/jobs/:queue/resume ─────────────────────────────────────────────
 
-router.post('/:queue/resume', authenticate, async (req: Request, res: Response) => {
+router.post('/:queue/resume', authenticate, requireRole('admin', 'operator'), async (req: Request, res: Response) => {
   try {
     const queueName = param(req, 'queue');
     const q = QUEUES[queueName];
@@ -133,7 +133,7 @@ router.post('/:queue/resume', authenticate, async (req: Request, res: Response) 
 
 // ── POST /api/jobs/:queue/drain — remove all waiting jobs ───────────────────
 
-router.post('/:queue/drain', authenticate, async (req: Request, res: Response) => {
+router.post('/:queue/drain', authenticate, requireRole('admin'), async (req: Request, res: Response) => {
   try {
     const queueName = param(req, 'queue');
     const q = QUEUES[queueName];

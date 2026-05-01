@@ -20,6 +20,10 @@ export interface IEnrichment extends Document {
   automationLevel: 'none' | 'basic' | 'moderate' | 'advanced';
   automationSignals: string[];
   socialActivity: 'active' | 'inactive' | 'unknown';
+  socialConfidence: 'high' | 'medium' | 'low' | 'unverified';
+  socialDetectionLayers: string[];
+  dataQualityFlags: string[];
+  needsManualReview: boolean;
   detectedPains: string[];
   primaryPain?: string;
   pitchAngle?: string;
@@ -58,6 +62,14 @@ const EnrichmentSchema = new Schema<IEnrichment>(
       enum: ['active', 'inactive', 'unknown'],
       default: 'unknown',
     },
+    socialConfidence: {
+      type: String,
+      enum: ['high', 'medium', 'low', 'unverified'],
+      default: 'unverified',
+    },
+    socialDetectionLayers: { type: [String], default: [] },
+    dataQualityFlags: { type: [String], default: [] },
+    needsManualReview: { type: Boolean, default: false },
     phone: { type: String },
     email: { type: String },
     socialLinks: { type: [String], default: [] },

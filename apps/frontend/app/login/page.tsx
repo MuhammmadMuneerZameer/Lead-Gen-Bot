@@ -2,7 +2,7 @@
 
 import { useState, FormEvent } from 'react';
 import { useRouter } from 'next/navigation';
-import { auth, setToken, setUser } from '../lib/api';
+import { auth, setToken, setRefreshToken, setUser } from '../lib/api';
 
 export default function LoginPage() {
   const router = useRouter();
@@ -18,6 +18,7 @@ export default function LoginPage() {
     try {
       const result = await auth.login(email, password);
       setToken(result.accessToken);
+      setRefreshToken(result.refreshToken);
       setUser(result.user);
       router.push('/');
     } catch (err) {
@@ -115,7 +116,7 @@ export default function LoginPage() {
         </div>
 
         <div style={{ textAlign: 'center', marginTop: 16, fontSize: 10, color: 'var(--fg-muted)', textTransform: 'uppercase', letterSpacing: '0.08em' }}>
-          Default: admin@hydrafox.local / HydraFox2025!
+          Contact your administrator for access credentials
         </div>
       </div>
     </div>

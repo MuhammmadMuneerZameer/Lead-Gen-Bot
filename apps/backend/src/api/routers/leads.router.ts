@@ -1,5 +1,6 @@
 import { Router, Request, Response } from 'express';
 import { z } from 'zod';
+import { isValidObjectId } from 'mongoose';
 import { authenticate } from '../../middleware/auth.middleware';
 import { validate } from '../../middleware/validate.middleware';
 import { Lead } from '../../models/lead.model';
@@ -64,7 +65,7 @@ router.get('/', authenticate, validate(ListQuerySchema, 'query'), async (req: Re
     const filter: Record<string, unknown> = {};
     if (opportunityLevel) filter.opportunityLevel = opportunityLevel;
     if (status) filter.status = status;
-    if (industry) filter.industry = new RegExp(industry, 'i');
+    if (industry) filter.industry = new RegExp(industry.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
     if (source) filter.source = source;
     if (search) {
       const escaped = search.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -96,6 +97,7 @@ router.get('/', authenticate, validate(ListQuerySchema, 'query'), async (req: Re
 
 router.get('/:id', authenticate, async (req: Request, res: Response) => {
   try {
+    if (!isValidObjectId(req.params.id)) { res.status(400).json({ error: 'INVALID_ID' }); return; }
     const lead = await Lead.findById(req.params.id).lean();
     if (!lead) {
       res.status(404).json({ error: 'NOT_FOUND' });
@@ -129,6 +131,7 @@ router.post('/', authenticate, validate(ManualLeadSchema), async (req: Request, 
 
 router.patch('/:id/status', authenticate, validate(StatusUpdateSchema), async (req: Request, res: Response) => {
   try {
+    if (!isValidObjectId(req.params.id)) { res.status(400).json({ error: 'INVALID_ID' }); return; }
     const lead = await Lead.findByIdAndUpdate(
       req.params.id,
       { status: (req.body as z.infer<typeof StatusUpdateSchema>).status },
@@ -149,6 +152,7 @@ router.patch('/:id/status', authenticate, validate(StatusUpdateSchema), async (r
 
 router.post('/:id/outcome', authenticate, validate(OutcomeSchema), async (req: Request, res: Response) => {
   try {
+    if (!isValidObjectId(req.params.id)) { res.status(400).json({ error: 'INVALID_ID' }); return; }
     const lead = await Lead.findById(req.params.id).lean();
     if (!lead) {
       res.status(404).json({ error: 'NOT_FOUND' });
@@ -200,6 +204,7 @@ router.post('/:id/outcome', authenticate, validate(OutcomeSchema), async (req: R
 
 router.post('/:id/rescore', authenticate, async (req: Request, res: Response) => {
   try {
+    if (!isValidObjectId(req.params.id)) { res.status(400).json({ error: 'INVALID_ID' }); return; }
     const lead = await Lead.findById(req.params.id);
     if (!lead) {
       res.status(404).json({ error: 'NOT_FOUND' });
@@ -234,6 +239,7 @@ router.post('/:id/rescore', authenticate, async (req: Request, res: Response) =>
 
 router.delete('/:id', authenticate, async (req: Request, res: Response) => {
   try {
+    if (!isValidObjectId(req.params.id)) { res.status(400).json({ error: 'INVALID_ID' }); return; }
     const lead = await Lead.findByIdAndUpdate(
       req.params.id,
       { status: 'archived' },

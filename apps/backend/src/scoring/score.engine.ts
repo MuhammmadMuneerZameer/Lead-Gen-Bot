@@ -20,6 +20,59 @@ import { logger } from '../lib/logger';
 const SCORING_CACHE_KEY = 'scoring:config:active';
 const SCORING_CACHE_TTL = 300; // 5 minutes
 
+// ── Major brand domain blocklist ─────────────────────────────────────────────
+// These are well-known chains / Fortune-500 companies that are not prospects
+// for web-design or lead-gen services. Any domain here gets score=0 / priority=low.
+const MAJOR_BRAND_DOMAINS = new Set([
+  // Fast food / QSR
+  'mcdonalds.com','starbucks.com','subway.com','burgerking.com','wendys.com',
+  'tacobell.com','kfc.com','dominos.com','pizzahut.com','chipotle.com',
+  'dunkindonuts.com','dunkin.com','sonic.com','arbys.com','dairyqueen.com',
+  'fiveguys.com','shakeshack.com','panera.com','panerabread.com','papajohns.com',
+  'popeyes.com','chickfila.com','whataburger.com','jackinthebox.com','in-n-out.com',
+  // Retail / grocery
+  'walmart.com','target.com','homedepot.com','lowes.com','bestbuy.com',
+  'costco.com','samsclub.com','kroger.com','safeway.com','walgreens.com',
+  'cvs.com','riteaid.com','macys.com','nordstrom.com','tjmaxx.com',
+  'marshalls.com','kohls.com','jcpenney.com','dollartree.com','familydollar.com',
+  'dollargeneral.com','aldi.com','traderjoes.com','publix.com','heb.com',
+  'wegmans.com','wholefoods.com','sprouts.com',
+  // Fashion / apparel
+  'ralphlauren.com','nike.com','adidas.com','gap.com','oldnavy.com',
+  'bananarepublic.com','hm.com','zara.com','uniqlo.com','forever21.com',
+  'victoriassecret.com','underarmour.com','levis.com','express.com',
+  // Gyms / fitness
+  'planetfitness.com','24hourfit.com','lafitness.com','equinox.com',
+  'anytimefitness.com','orangetheory.com','crunch.com','crunchfitness.com',
+  // Hotels / lodging
+  'marriott.com','hilton.com','hyatt.com','ihg.com','wyndham.com',
+  'bestwestern.com','choicehotels.com','radisson.com','holidayinn.com',
+  // Auto
+  'ford.com','chevrolet.com','gm.com','toyota.com','honda.com',
+  'bmw.com','mercedes-benz.com','audi.com','volkswagen.com','nissan.com',
+  'hyundai.com','kia.com','lexus.com','acura.com','infiniti.com',
+  // Telecom
+  'att.com','verizon.com','tmobile.com','comcast.com','spectrum.com','xfinity.com',
+  // Financial
+  'chase.com','bankofamerica.com','wellsfargo.com','citibank.com','usbank.com',
+  'capitalone.com','americanexpress.com','discover.com',
+  // Big tech
+  'amazon.com','apple.com','google.com','microsoft.com','meta.com',
+]);
+
+/** Returns true if the domain belongs to a major brand that is not a prospect. */
+export function isMajorBrand(domain: string): boolean {
+  if (!domain) return false;
+  const normalized = domain.toLowerCase().replace(/^www\./, '');
+  // Exact match OR check if the domain ends with a blocklisted root
+  // (e.g. "ny.starbucks.com" → starbucks.com)
+  if (MAJOR_BRAND_DOMAINS.has(normalized)) return true;
+  for (const brand of MAJOR_BRAND_DOMAINS) {
+    if (normalized.endsWith('.' + brand)) return true;
+  }
+  return false;
+}
+
 /** Weights used when no DB config exists — exported for seed.ts */
 export const DEFAULT_WEIGHTS: Record<string, number> = {
   noWebsite:        40,
@@ -140,15 +193,32 @@ export async function scoreLeadFromDB(data: {
     email?: string;
     socialLinks?: string[];
     websiteQuality?: string;
+    socialConfidence?: 'high' | 'medium' | 'low' | 'unverified';
+    dataQualityFlags?: string[];
   };
 }): Promise<{
   score: number;
   priority: 'high' | 'medium' | 'low';
   scoreBreakdown: Record<string, number>;
   configVersion: number;
+  needsManualReview: boolean;
 }> {
   const { enrichment, industryTier } = data;
   const { weights, version } = await loadActiveWeights();
+
+  // Dampen noSocialPresence when detection confidence is weak:
+  //   low        → 50%  (bare-domain only — could be pixel/CDN, not actual social absence)
+  //   unverified → 25%  (site errored — absence signal cannot be trusted)
+  const adjustedWeights = { ...weights };
+  const socialAbsent = !enrichment.socialLinks || enrichment.socialLinks.length === 0;
+  if (socialAbsent) {
+    const base = weights['noSocialPresence'] ?? DEFAULT_WEIGHTS['noSocialPresence'];
+    if (enrichment.socialConfidence === 'low') {
+      adjustedWeights['noSocialPresence'] = Math.round(base * 0.5);
+    } else if (enrichment.socialConfidence === 'unverified') {
+      adjustedWeights['noSocialPresence'] = Math.round(base * 0.25);
+    }
+  }
 
   const result = calculateOpportunityScore(
     {
@@ -158,13 +228,21 @@ export async function scoreLeadFromDB(data: {
       websiteQuality: (enrichment.websiteQuality as OpportunityInput['websiteQuality']) || 'unknown',
       industryTier: industryTier ?? 2,
     },
-    weights,
+    adjustedWeights,
   );
+
+  // Manual review when uncertain signals pushed a lead to high-opportunity
+  const needsManualReview =
+    result.level === 'high' &&
+    (enrichment.socialConfidence === 'low' ||
+     enrichment.socialConfidence === 'unverified' ||
+     (enrichment.dataQualityFlags ?? []).some(f => f.includes('unconfirmed') || f.includes('error')));
 
   return {
     score: result.score,
     priority: result.level,
     scoreBreakdown: result.breakdown,
     configVersion: version,
+    needsManualReview,
   };
 }

@@ -14,7 +14,7 @@ import { redis } from '../lib/redis';
 import { logger } from '../lib/logger';
 import { Lead } from '../models/lead.model';
 import { Enrichment } from '../models/enrichment.model';
-import { scoreLeadFromDB } from '../scoring/score.engine';
+import { scoreLeadFromDB, isMajorBrand } from '../scoring/score.engine';
 import { aiService } from '../ai/ai.service';
 
 export interface ScoringJobData {
@@ -34,6 +34,17 @@ export const scoringWorker = new Worker<ScoringJobData>(
       return { skipped: true };
     }
 
+    // Pre-filter: major brands are not web-services prospects
+    if (isMajorBrand(lead.domain)) {
+      lead.opportunityScore = 0;
+      lead.opportunityLevel = 'low';
+      lead.scoreBreakdown = { majorBrandFiltered: 1 };
+      lead.scoringConfigVersion = 0;
+      await lead.save();
+      logger.info('Lead auto-filtered: major brand', { leadId, domain: lead.domain });
+      return { score: 0, level: 'low', filtered: true };
+    }
+
     const enrichment = await Enrichment.findOne({ leadId }).lean();
     if (!enrichment) {
       logger.warn('Scoring: enrichment not found', { leadId });
@@ -43,7 +54,14 @@ export const scoringWorker = new Worker<ScoringJobData>(
     const result = await scoreLeadFromDB({
       industry: lead.industry,
       industryTier: lead.industryTier,
-      enrichment,
+      enrichment: {
+        siteStatus: enrichment.siteStatus,
+        email: enrichment.email,
+        socialLinks: enrichment.socialLinks,
+        websiteQuality: enrichment.websiteQuality,
+        socialConfidence: enrichment.socialConfidence,
+        dataQualityFlags: enrichment.dataQualityFlags,
+      },
     });
 
     lead.opportunityScore = result.score;
@@ -52,14 +70,26 @@ export const scoringWorker = new Worker<ScoringJobData>(
     lead.scoringConfigVersion = result.configVersion;
     await lead.save();
 
+    if (result.needsManualReview) {
+      await Enrichment.findOneAndUpdate({ leadId }, { needsManualReview: true });
+      logger.warn('Lead flagged for manual review — uncertain signals drove high score', {
+        leadId,
+        socialConfidence: enrichment.socialConfidence,
+        dataQualityFlags: enrichment.dataQualityFlags,
+      });
+    }
+
     logger.info('Lead scored', {
       leadId,
       score: result.score,
       level: result.priority,
+      needsManualReview: result.needsManualReview,
     });
 
     // HIGH opportunity leads get immediate AI analysis
-    if (result.priority === 'high') {
+    // Skip if already analyzed (prevents wasting tokens on re-scores)
+    const alreadyAnalyzed = enrichment.primaryPain && (enrichment.detectedPains?.length ?? 0) > 0;
+    if (result.priority === 'high' && !alreadyAnalyzed) {
       try {
         const analysis = await aiService.analyseHotLead(
           { _id: lead._id, businessName: lead.businessName, domain: lead.domain, industry: lead.industry },

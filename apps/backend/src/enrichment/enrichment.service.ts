@@ -9,13 +9,22 @@
  *  - Deduplicates and validates all extracted data
  */
 
-import { chromium, Browser, BrowserContext } from 'playwright-core';
+import { chromium, Browser, BrowserContext, Page } from 'playwright-core';
 import { logger } from '../lib/logger';
+import {
+  SocialDetectionResult,
+  extractSocialsWithConfidence,
+} from './social.utils';
+
+export type { SocialDetectionResult };
 
 export interface EnrichmentResult {
   phone?: string;
   email?: string;
   socialLinks: string[];
+  socialConfidence: SocialDetectionResult['confidence'];
+  socialDetectionLayers: string[];
+  dataQualityFlags: string[];
   websiteQuality: 'outdated' | 'basic' | 'modern' | 'unknown';
   techStack: string[];
   cms: 'WordPress' | 'Shopify' | 'Wix' | 'Squarespace' | 'custom' | 'unknown';
@@ -38,6 +47,21 @@ async function getBrowser(): Promise<Browser> {
     args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'],
   });
   return browser;
+}
+
+/** Layer 0: live DOM query — catches JS-rendered social links that regex never sees */
+async function extractSocialsViaDOM(page: Page): Promise<string[]> {
+  try {
+    const selector = [
+      'instagram.com', 'facebook.com', 'linkedin.com',
+      'twitter.com', 'x.com', 'tiktok.com', 'youtube.com',
+    ].map(d => `a[href*="${d}"]`).join(', ');
+    return await page.$$eval(selector, els =>
+      [...new Set(els.map(el => (el as HTMLAnchorElement).href).filter(Boolean))]
+    );
+  } catch {
+    return [];
+  }
 }
 
 // ── Email extraction ─────────────────────────────────────────────────────────
@@ -128,26 +152,6 @@ function extractPhones(html: string): string[] {
     if (!seen.has(key)) { seen.add(key); deduped.push(p); }
   }
   return deduped;
-}
-
-// ── Social links ─────────────────────────────────────────────────────────────
-
-function extractSocials(html: string): string[] {
-  const patterns = [
-    /https?:\/\/(www\.)?facebook\.com\/(?!sharer|share|login|pg|pages\/create)[a-zA-Z0-9._\-/]+/gi,
-    /https?:\/\/(www\.)?instagram\.com\/[a-zA-Z0-9._\-]+\/?/gi,
-    /https?:\/\/(www\.)?linkedin\.com\/(company|in)\/[a-zA-Z0-9_\-]+/gi,
-    /https?:\/\/(www\.)?twitter\.com\/[a-zA-Z0-9_]+/gi,
-    /https?:\/\/(www\.)?x\.com\/[a-zA-Z0-9_]+/gi,
-    /https?:\/\/(www\.)?tiktok\.com\/@[a-zA-Z0-9._\-]+/gi,
-  ];
-
-  const socials: string[] = [];
-  for (const p of patterns) {
-    const matches = html.match(p) ?? [];
-    socials.push(...matches.slice(0, 2));
-  }
-  return [...new Set(socials)].slice(0, 8);
 }
 
 // ── Quality / CMS / Automation ───────────────────────────────────────────────
@@ -282,10 +286,16 @@ export async function enrichWebsite(domain: string, website?: string): Promise<E
       });
 
       await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 20000 });
-      // Let JS render briefly
-      await new Promise(r => setTimeout(r, 1500));
+      await page.waitForLoadState('networkidle', { timeout: 5000 }).catch(() => {});
 
-      let html = await page.content();
+      // Scroll to bottom so lazy-loaded footer/social widgets render, then re-settle
+      await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
+      await page.waitForLoadState('networkidle', { timeout: 3000 }).catch(() => {});
+
+      // DOM-native extraction before grabbing HTML — catches JS-rendered social links
+      const domSocials = await extractSocialsViaDOM(page);
+
+      let html = await page.content(); // captured after full scroll + lazy-load settle
       const baseUrl = page.url(); // actual URL after redirects
 
       // ── Multi-page scan for contact info ───────────────────────────────────
@@ -311,7 +321,7 @@ export async function enrichWebsite(domain: string, website?: string): Promise<E
         try {
           const subPage = await context.newPage();
           await subPage.goto(subUrl, { waitUntil: 'domcontentloaded', timeout: 8000 });
-          await new Promise(r => setTimeout(r, 800));
+          await subPage.waitForLoadState('networkidle', { timeout: 3000 }).catch(() => {});
           html += '\n' + await subPage.content();
           await subPage.close();
           logger.debug('Enrichment: scanned sub-page', { subUrl });
@@ -323,7 +333,12 @@ export async function enrichWebsite(domain: string, website?: string): Promise<E
       // ── Extract all data ───────────────────────────────────────────────────
       const emails = extractEmails(html);
       const phones = extractPhones(html);
-      const socials = extractSocials(html);
+      let socialDetection = extractSocialsWithConfidence(html);
+      // Merge DOM socials — live browser sees JS-rendered links regex misses
+      if (domSocials.length > 0) {
+        const merged = [...new Set([...domSocials, ...socialDetection.links])].slice(0, 8);
+        socialDetection = { links: merged, confidence: 'high', layers: ['dom_query', ...socialDetection.layers] };
+      }
       const quality = detectQuality(html);
       const cms = detectCMS(html);
       const { level: automationLevel, signals: automationSignals } = detectAutomation(html);
@@ -334,25 +349,43 @@ export async function enrichWebsite(domain: string, website?: string): Promise<E
       const hasChatbot = /chatbot|livechat|intercom|drift|tawk|crisp/i.test(html);
       const hasContactForm = /<form[^>]*>/i.test(html) && /contact|message|inquiry|enquiry/i.test(html);
 
+      // ── Data quality flags ─────────────────────────────────────────────────
+      const dataQualityFlags: string[] = [];
+      if (socialDetection.confidence === 'low') {
+        dataQualityFlags.push('social_single_source');
+      }
+      if (!emails[0]) {
+        dataQualityFlags.push('email_absent');
+      }
+
       await context.close();
       context = null;
 
       logger.info('Enrichment: complete', {
         domain, emails: emails.length, phones: phones.length,
-        socials: socials.length, quality, cms,
+        socials: socialDetection.links.length,
+        socialConfidence: socialDetection.confidence,
+        socialLayers: socialDetection.layers,
+        quality, cms,
+        dataQualityFlags,
       });
 
       return {
         email: emails[0],
         phone: phones[0],
-        socialLinks: socials,
+        socialLinks: socialDetection.links,
+        socialConfidence: socialDetection.confidence,
+        socialDetectionLayers: socialDetection.layers,
+        dataQualityFlags,
         websiteQuality: quality,
         techStack,
         cms,
         automationLevel,
         automationSignals,
         siteStatus: redirected ? 'redirect' : 'live',
-        rawHtmlSnapshot: html.slice(0, 5000),
+        rawHtmlSnapshot: html.length > 5000
+          ? html.slice(0, 2500) + '\n...\n' + html.slice(-2500)
+          : html,
         hasSSL,
         hasChatbot,
         hasContactForm,
@@ -373,6 +406,9 @@ export async function enrichWebsite(domain: string, website?: string): Promise<E
         logger.error('Enrichment failed — all URLs exhausted', { domain, siteStatus, error: msg });
         return {
           socialLinks: [],
+          socialConfidence: 'unverified' as const,
+          socialDetectionLayers: [],
+          dataQualityFlags: ['site_error'],
           websiteQuality: 'unknown',
           techStack: [],
           cms: 'unknown',
@@ -392,6 +428,9 @@ export async function enrichWebsite(domain: string, website?: string): Promise<E
   // Fallback (should never reach)
   return {
     socialLinks: [],
+    socialConfidence: 'unverified' as const,
+    socialDetectionLayers: [],
+    dataQualityFlags: ['site_error'],
     websiteQuality: 'unknown',
     techStack: [],
     cms: 'unknown',

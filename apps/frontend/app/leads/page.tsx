@@ -323,7 +323,7 @@ function LeadsList() {
   const [opportunityLevel, setOpportunityLevel] = useState(searchParams?.get('opportunityLevel') ?? '');
   const [status, setStatus]   = useState('');
   const [search, setSearch]   = useState('');
-  const [sortBy, setSortBy]   = useState('opportunityScore');
+  const [sortBy, setSortBy]   = useState('createdAt');
   const [sortDir, setSortDir] = useState('desc');
   const [page, setPage]       = useState(1);
 
@@ -361,7 +361,14 @@ function LeadsList() {
   }, [router, page, opportunityLevel, status, search, sortBy, sortDir]);
 
   useEffect(() => { setIsMounted(true); }, []);
-  useEffect(() => { if (isMounted) fetchLeads(); }, [isMounted, fetchLeads]);
+  useEffect(() => {
+    if (!isMounted) return;
+    fetchLeads();
+    // Auto-refresh every 10s while jobs may be running (first 5 minutes after mount)
+    const id = setInterval(fetchLeads, 10000);
+    const stop = setTimeout(() => clearInterval(id), 5 * 60 * 1000);
+    return () => { clearInterval(id); clearTimeout(stop); };
+  }, [isMounted, fetchLeads]);
 
   async function openDetail(lead: Lead) {
     setDetailLead(lead);

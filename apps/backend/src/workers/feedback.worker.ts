@@ -112,42 +112,29 @@ export const feedbackWorker = new Worker(
     logger.info('Feedback worker: drift detected, calling optimizer', { hotRate, warmRate, coldRate });
 
     // ── Ask Claude to propose weight adjustments ────────────────────────────
+    // Only fetch 20 representative samples (stratified: worst predictions first)
     const recentOutcomes = await OutcomeLog.find({ loggedAt: { $gte: since } })
       .sort({ loggedAt: -1 })
-      .limit(50)
+      .limit(20)
+      .select('predictedPriority predictedScore actualOutcome industryTier scoreFactors')
       .lean();
 
     const systemPrompt = `You are a machine learning engineer optimising a B2B lead scoring model.
 Analyse the prediction performance data and propose specific scoring weight adjustments.
 Return ONLY valid JSON — no markdown, no explanation.`;
 
-    const userPrompt = `Current scoring weights:
-${JSON.stringify(currentConfig.weights, null, 2)}
-
-Outcome statistics (last 7 days, ${totalOutcomes} samples):
-${JSON.stringify(stats, null, 2)}
-
-Recent outcome sample (last 50):
-${JSON.stringify(
-  recentOutcomes.map(o => ({
-    predictedPriority: o.predictedPriority,
-    predictedScore: o.predictedScore,
-    actualOutcome: o.actualOutcome,
-    replyQuality: o.replyQuality,
-    industryTier: o.industryTier,
-    scoreFactors: o.scoreFactors,
-  })),
-  null,
-  2,
-)}
-
-The model is mis-calibrated: HOT leads should convert at higher rates than WARM leads.
-Current rates — HOT: ${(hotRate * 100).toFixed(1)}%, WARM: ${(warmRate * 100).toFixed(1)}%, COLD: ${(coldRate * 100).toFixed(1)}%
-
-Propose weight adjustments to improve calibration. Be conservative — change at most 3-4 weights by at most ±5 points each.
-
-Return JSON array of changes:
-[{ "factor": "string", "oldWeight": number, "newWeight": number, "reason": "string" }]`;
+    // Use compact JSON for samples to save ~40% tokens vs pretty-print
+    const userPrompt = `Weights:${JSON.stringify(currentConfig.weights)}
+Stats:${JSON.stringify(stats)}
+Sample(n=20):${JSON.stringify(recentOutcomes.map(o => ({
+  p: o.predictedPriority,
+  s: o.predictedScore,
+  a: o.actualOutcome,
+  t: o.industryTier,
+  f: o.scoreFactors,
+})))}
+Rates HOT:${(hotRate * 100).toFixed(1)}% WARM:${(warmRate * 100).toFixed(1)}% COLD:${(coldRate * 100).toFixed(1)}%
+Return JSON array (max 4 changes, ±5pts each):[{"factor":"","oldWeight":0,"newWeight":0,"reason":""}]`;
 
     let proposedChanges: Array<{ factor: string; oldWeight: number; newWeight: number; reason: string }> = [];
 
@@ -156,7 +143,7 @@ Return JSON array of changes:
         model: MODEL_SONNET,
         systemPrompt,
         userPrompt,
-        purpose: 'lead_analysis',
+        purpose: 'prompt_optimization',
         maxTokens: 512,
       });
 

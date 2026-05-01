@@ -39,6 +39,9 @@ export const enrichmentWorker = new Worker<EnrichJobData>(
       phone: result.phone,
       email: result.email,
       socialLinks: result.socialLinks,
+      socialConfidence: result.socialConfidence,
+      socialDetectionLayers: result.socialDetectionLayers,
+      dataQualityFlags: result.dataQualityFlags,
       websiteQuality: result.websiteQuality,
       techStack: result.techStack,
       cms: result.cms,
@@ -52,6 +55,10 @@ export const enrichmentWorker = new Worker<EnrichJobData>(
       mobileFriendly: result.mobileFriendly,
       enrichedAt: new Date(),
     };
+
+    if (result.dataQualityFlags.length > 0) {
+      logger.warn('Enrichment: data quality flags raised', { leadId, flags: result.dataQualityFlags });
+    }
 
     const existing = await Enrichment.findOne({ leadId: lead._id });
     if (existing) {

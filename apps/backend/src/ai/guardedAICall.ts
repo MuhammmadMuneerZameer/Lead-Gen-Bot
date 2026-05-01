@@ -137,6 +137,7 @@ export async function guardedAICall(opts: GuardedCallOptions): Promise<GuardedCa
     response = await client.chat.completions.create({
       model,
       max_tokens: maxTokens,
+      temperature: 0,  // deterministic — maximises cache hit rate for identical prompts
       messages: [
         { role: 'system', content: systemPrompt },
         { role: 'user', content: userPrompt },

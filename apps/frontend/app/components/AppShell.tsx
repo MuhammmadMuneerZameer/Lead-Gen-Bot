@@ -118,6 +118,49 @@ function QueueBlock({
   );
 }
 
+// ── Toast notification ────────────────────────────────────────────────────────
+
+function Toast({ query, onClose }: { query: string; onClose: () => void }) {
+  useEffect(() => {
+    const t = setTimeout(onClose, 6000);
+    return () => clearTimeout(t);
+  }, [onClose]);
+
+  return (
+    <div style={{
+      position: 'fixed', bottom: 24, right: 24, zIndex: 9999,
+      background: 'var(--surface)', border: '1px solid var(--primary)',
+      borderRadius: 6, padding: '14px 18px', minWidth: 280, maxWidth: 360,
+      boxShadow: '0 4px 24px rgba(0,0,0,0.5)',
+      display: 'flex', flexDirection: 'column', gap: 8,
+      animation: 'slideUp 0.25s ease',
+    }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 8 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          <span style={{ fontSize: 16 }}>✅</span>
+          <span style={{ fontFamily: "'Share Tech Mono', monospace", fontSize: 11, color: 'var(--success)', letterSpacing: '0.06em', textTransform: 'uppercase' }}>
+            Research Complete
+          </span>
+        </div>
+        <button
+          onClick={onClose}
+          style={{ background: 'none', border: 'none', color: 'var(--fg-muted)', cursor: 'pointer', fontSize: 14, lineHeight: 1, padding: 0 }}
+        >✕</button>
+      </div>
+      <div style={{ fontSize: 11, color: 'var(--fg-dim)' }}>
+        Leads for <span style={{ color: 'var(--fg)', fontWeight: 600 }}>{query}</span> have been scraped, enriched, and scored.
+      </div>
+      <Link
+        href="/leads?sortBy=createdAt&sortDir=desc"
+        onClick={onClose}
+        style={{ fontSize: 10, color: 'var(--primary)', textDecoration: 'none', fontFamily: "'Share Tech Mono', monospace", letterSpacing: '0.08em' }}
+      >
+        VIEW NEW LEADS →
+      </Link>
+    </div>
+  );
+}
+
 // ── AppShell ──────────────────────────────────────────────────────────────────
 
 export default function AppShell({ children }: { children: React.ReactNode }) {
@@ -138,6 +181,9 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
   const [launchError, setLaunchError] = useState('');
   const [scrapeLog, setScrapeLogRaw] = useState<string[]>([]);
   const [activeJobId, setActiveJobIdRaw] = useState<string | null>(null);
+
+  // Completion toast
+  const [toastQuery, setToastQuery] = useState<string | null>(null);
 
   function setScrapeLog(lines: string[] | ((prev: string[]) => string[])) {
     setScrapeLogRaw(prev => {
@@ -211,6 +257,11 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
     setLaunchError('');
     setScrapeLog([]);
 
+    // Request browser notification permission on first launch (requires user gesture)
+    if (typeof Notification !== 'undefined' && Notification.permission === 'default') {
+      Notification.requestPermission().catch(() => {});
+    }
+
     try {
       setScrapeLog([`[INIT] Connecting to scraper engine...`]);
       const loc = resolvedLocation || undefined;
@@ -244,6 +295,15 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
           clearInterval(interval);
           setActiveJobId(null);
           fetchStats();
+          // In-app toast
+          setToastQuery(q);
+          // OS-level browser notification (fires even when tab is not focused)
+          if (typeof Notification !== 'undefined' && Notification.permission === 'granted') {
+            new Notification('HydraFox — Research Complete', {
+              body: `Leads for "${q}" are ready. Click to view.`,
+              icon: '/favicon.ico',
+            });
+          }
         }
       }, 7000);
     } catch (err) {
@@ -545,6 +605,11 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
       <main className="main-content">
         {children}
       </main>
+
+      {/* ── Completion toast ───────────────────────────────────────────────── */}
+      {toastQuery && (
+        <Toast query={toastQuery} onClose={() => setToastQuery(null)} />
+      )}
     </div>
   );
 }

@@ -15,8 +15,18 @@ export function setToken(token: string): void {
   localStorage.setItem('hf_token', token);
 }
 
+export function getRefreshToken(): string | null {
+  if (typeof window === 'undefined') return null;
+  return localStorage.getItem('hf_refresh_token');
+}
+
+export function setRefreshToken(token: string): void {
+  localStorage.setItem('hf_refresh_token', token);
+}
+
 export function clearToken(): void {
   localStorage.removeItem('hf_token');
+  localStorage.removeItem('hf_refresh_token');
   localStorage.removeItem('hf_user');
 }
 
@@ -38,7 +48,34 @@ class ApiError extends Error {
   }
 }
 
-async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
+let refreshing: Promise<string | null> | null = null;
+
+async function tryRefresh(): Promise<string | null> {
+  if (refreshing) return refreshing;
+  refreshing = (async () => {
+    const rt = getRefreshToken();
+    if (!rt) return null;
+    try {
+      const res = await fetch(`${BASE}/api/auth/refresh`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ refreshToken: rt }),
+      });
+      if (!res.ok) return null;
+      const data = await res.json() as { accessToken: string; refreshToken: string };
+      setToken(data.accessToken);
+      setRefreshToken(data.refreshToken);
+      return data.accessToken;
+    } catch {
+      return null;
+    } finally {
+      refreshing = null;
+    }
+  })();
+  return refreshing;
+}
+
+async function request<T>(path: string, options: RequestInit = {}, _retry = true): Promise<T> {
   const token = getToken();
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
@@ -47,6 +84,14 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   if (token) headers['Authorization'] = `Bearer ${token}`;
 
   const res = await fetch(`${BASE}${path}`, { ...options, headers });
+
+  if (res.status === 401 && _retry) {
+    const newToken = await tryRefresh();
+    if (newToken) return request<T>(path, options, false);
+    clearToken();
+    if (typeof window !== 'undefined') window.location.href = '/login';
+    throw new ApiError('Unauthorized', 401);
+  }
 
   if (res.status === 401) {
     clearToken();

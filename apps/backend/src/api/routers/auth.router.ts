@@ -2,7 +2,7 @@ import { Router, Request, Response } from 'express';
 import { z } from 'zod';
 import { validate } from '../../middleware/validate.middleware';
 import { authenticate, generateTokens, verifyRefreshToken } from '../../middleware/auth.middleware';
-import { authLimiter } from '../../middleware/rateLimit.middleware';
+import { authLimiter, registerLimiter } from '../../middleware/rateLimit.middleware';
 import { User, hashPassword } from '../../models/user.model';
 import { logger } from '../../lib/logger';
 
@@ -27,7 +27,7 @@ const RefreshSchema = z.object({
 
 // ── POST /api/auth/register ─────────────────────────────────────────────────
 
-router.post('/register', validate(RegisterSchema), async (req: Request, res: Response) => {
+router.post('/register', registerLimiter, validate(RegisterSchema), async (req: Request, res: Response) => {
   try {
     const { email, password, name } = req.body as z.infer<typeof RegisterSchema>;
 

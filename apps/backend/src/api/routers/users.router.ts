@@ -1,6 +1,7 @@
 import { Router, Request, Response } from 'express';
 import { z } from 'zod';
-import { authenticate } from '../../middleware/auth.middleware';
+import { isValidObjectId } from 'mongoose';
+import { authenticate, requireRole } from '../../middleware/auth.middleware';
 import { validate } from '../../middleware/validate.middleware';
 import { User, hashPassword } from '../../models/user.model';
 import { logger } from '../../lib/logger';
@@ -16,7 +17,7 @@ const UpdateUserSchema = z.object({
 
 // ── GET /api/users ────────────────────────────────────────────────────────────
 
-router.get('/', authenticate, async (_req: Request, res: Response) => {
+router.get('/', authenticate, requireRole('admin'), async (_req: Request, res: Response) => {
   try {
     const users = await User.find().sort({ createdAt: -1 }).lean();
     res.json({ data: users.map(u => ({ ...u, passwordHash: undefined })) });
@@ -30,6 +31,18 @@ router.get('/', authenticate, async (_req: Request, res: Response) => {
 
 router.get('/:id', authenticate, async (req: Request, res: Response) => {
   try {
+    // Users can only view their own profile; admins can view any
+    const isOwnProfile = req.params.id === req.user?.userId;
+    const requestingUser = await User.findById(req.user?.userId).select('role').lean();
+    const isAdmin = requestingUser?.role === 'admin';
+    if (!isOwnProfile && !isAdmin) {
+      res.status(403).json({ error: 'FORBIDDEN' });
+      return;
+    }
+    if (!isValidObjectId(req.params.id)) {
+      res.status(400).json({ error: 'INVALID_ID' });
+      return;
+    }
     const user = await User.findById(req.params.id).lean();
     if (!user) {
       res.status(404).json({ error: 'NOT_FOUND' });
@@ -47,8 +60,32 @@ router.get('/:id', authenticate, async (req: Request, res: Response) => {
 
 router.patch('/:id', authenticate, validate(UpdateUserSchema), async (req: Request, res: Response) => {
   try {
-    const { password, ...rest } = req.body as z.infer<typeof UpdateUserSchema>;
-    const update: Record<string, unknown> = { ...rest };
+    if (!isValidObjectId(req.params.id)) {
+      res.status(400).json({ error: 'INVALID_ID' });
+      return;
+    }
+    const isOwnProfile = req.params.id === req.user?.userId;
+    const requestingUser = await User.findById(req.user?.userId).select('role').lean();
+    const isAdmin = requestingUser?.role === 'admin';
+
+    if (!isOwnProfile && !isAdmin) {
+      res.status(403).json({ error: 'FORBIDDEN' });
+      return;
+    }
+
+    const { password, role, active, ...safeRest } = req.body as z.infer<typeof UpdateUserSchema>;
+
+    // Non-admins cannot change role or active status
+    if (!isAdmin && (role !== undefined || active !== undefined)) {
+      res.status(403).json({ error: 'FORBIDDEN', message: 'Cannot modify role or active status' });
+      return;
+    }
+
+    const update: Record<string, unknown> = {
+      ...safeRest,
+      ...(isAdmin && role !== undefined ? { role } : {}),
+      ...(isAdmin && active !== undefined ? { active } : {}),
+    };
 
     if (password) {
       update.passwordHash = await hashPassword(password);
@@ -69,7 +106,7 @@ router.patch('/:id', authenticate, validate(UpdateUserSchema), async (req: Reque
 
 // ── DELETE /api/users/:id — deactivate (soft delete) ─────────────────────────
 
-router.delete('/:id', authenticate, async (req: Request, res: Response) => {
+router.delete('/:id', authenticate, requireRole('admin'), async (req: Request, res: Response) => {
   try {
     if (req.params.id === req.user?.userId) {
       res.status(400).json({ error: 'CANNOT_DEACTIVATE_SELF' });

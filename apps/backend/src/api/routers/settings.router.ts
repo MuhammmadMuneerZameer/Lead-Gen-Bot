@@ -4,7 +4,7 @@
  */
 import { Router, Request, Response } from 'express';
 import { z } from 'zod';
-import { authenticate } from '../../middleware/auth.middleware';
+import { authenticate, requireRole } from '../../middleware/auth.middleware';
 import { validate } from '../../middleware/validate.middleware';
 import { ScoringConfig } from '../../models/scoringConfig.model';
 import { PromptTemplate } from '../../models/promptTemplate.model';
@@ -52,7 +52,7 @@ const WeightsUpdateSchema = z.object({
 
 // ── POST /api/settings/scoring — create new config version (manual override) ─
 
-router.post('/scoring', authenticate, validate(WeightsUpdateSchema), async (req: Request, res: Response) => {
+router.post('/scoring', authenticate, requireRole('admin'), validate(WeightsUpdateSchema), async (req: Request, res: Response) => {
   try {
     const { weights, reason } = req.body as z.infer<typeof WeightsUpdateSchema>;
 
@@ -97,7 +97,7 @@ router.post('/scoring', authenticate, validate(WeightsUpdateSchema), async (req:
 
 // ── POST /api/settings/scoring/:id/activate — rollback to older version ─────
 
-router.post('/scoring/:id/activate', authenticate, async (req: Request, res: Response) => {
+router.post('/scoring/:id/activate', authenticate, requireRole('admin'), async (req: Request, res: Response) => {
   try {
     const config = await ScoringConfig.findById(req.params.id);
     if (!config) {
@@ -173,7 +173,7 @@ const PromptUpdateSchema = z.object({
 
 // ── POST /api/settings/prompts — create new template ────────────────────────
 
-router.post('/prompts', authenticate, validate(PromptCreateSchema), async (req: Request, res: Response) => {
+router.post('/prompts', authenticate, requireRole('admin'), validate(PromptCreateSchema), async (req: Request, res: Response) => {
   try {
     const body = req.body as z.infer<typeof PromptCreateSchema>;
 
@@ -202,7 +202,7 @@ router.post('/prompts', authenticate, validate(PromptCreateSchema), async (req: 
 
 // ── PATCH /api/settings/prompts/:id — update template text (creates new version) ──
 
-router.patch('/prompts/:id', authenticate, validate(PromptUpdateSchema), async (req: Request, res: Response) => {
+router.patch('/prompts/:id', authenticate, requireRole('admin'), validate(PromptUpdateSchema), async (req: Request, res: Response) => {
   try {
     const existing = await PromptTemplate.findById(req.params.id).lean();
     if (!existing) {
@@ -236,7 +236,7 @@ router.patch('/prompts/:id', authenticate, validate(PromptUpdateSchema), async (
 
 // ── DELETE /api/settings/prompts/:id — retire a template ────────────────────
 
-router.delete('/prompts/:id', authenticate, async (req: Request, res: Response) => {
+router.delete('/prompts/:id', authenticate, requireRole('admin'), async (req: Request, res: Response) => {
   try {
     const template = await PromptTemplate.findByIdAndUpdate(
       req.params.id,

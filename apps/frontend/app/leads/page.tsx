@@ -2,7 +2,7 @@
 
 import { useEffect, useState, useCallback, Suspense } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
-import { leads, getToken, type Lead, type LeadFilters } from '../lib/api';
+import { leads, outreach, getToken, type Lead, type LeadFilters } from '../lib/api';
 import AppShell from '../components/AppShell';
 
 const OPP_COLOR: Record<string, string> = {
@@ -101,6 +101,36 @@ function LeadDetailModal({ lead, enrichment, loading, onClose }: {
 }) {
   const websiteUrl = lead.website ?? (lead.domain ? `https://${lead.domain}` : null);
 
+  const [showOutreach, setShowOutreach]     = useState(false);
+  const [oChannel, setOChannel]             = useState('email');
+  const [oMessage, setOMessage]             = useState('');
+  const [oFollowUp, setOFollowUp]           = useState('');
+  const [oSubmitting, setOSubmitting]       = useState(false);
+  const [oError, setOError]                 = useState('');
+  const [oSuccess, setOSuccess]             = useState(false);
+
+  async function submitOutreachLog() {
+    if (!oMessage.trim()) { setOError('Message is required'); return; }
+    setOSubmitting(true);
+    setOError('');
+    try {
+      await outreach.create({
+        leadId: lead._id,
+        channel: oChannel,
+        messageSent: oMessage.trim(),
+        followUpDate: oFollowUp || undefined,
+      });
+      setOSuccess(true);
+      setOMessage('');
+      setOFollowUp('');
+      setTimeout(() => { setOSuccess(false); setShowOutreach(false); }, 1500);
+    } catch (err) {
+      setOError((err as Error).message || 'Failed to log outreach');
+    } finally {
+      setOSubmitting(false);
+    }
+  }
+
   return (
     <div className="modal-overlay" onClick={onClose}>
       <div
@@ -118,15 +148,62 @@ function LeadDetailModal({ lead, enrichment, loading, onClose }: {
               href={websiteUrl}
               target="_blank"
               rel="noreferrer"
-              className="btn btn-primary"
+              className="btn btn-ghost"
               style={{ padding: '3px 10px', fontSize: 10, textDecoration: 'none', whiteSpace: 'nowrap' }}
               onClick={e => e.stopPropagation()}
             >
-              🌐 VISIT SITE
+              🌐 VISIT
             </a>
           )}
+          <button
+            className="btn btn-primary"
+            style={{ padding: '3px 10px', fontSize: 10, whiteSpace: 'nowrap' }}
+            onClick={e => { e.stopPropagation(); setShowOutreach(v => !v); setOError(''); setOSuccess(false); }}
+          >
+            {showOutreach ? 'CANCEL' : '✉ LOG OUTREACH'}
+          </button>
           <button className="btn btn-ghost" style={{ padding: '3px 8px', fontSize: 10 }} onClick={onClose}>✕</button>
         </div>
+
+        {/* ── Inline outreach form ─────────────────────────────────────────── */}
+        {showOutreach && (
+          <div style={{ padding: '12px 16px', borderBottom: '1px solid var(--border)', background: 'var(--surface-2)', display: 'flex', flexDirection: 'column', gap: 10 }}>
+            <div style={{ fontSize: 9, color: 'var(--fg-muted)', textTransform: 'uppercase', letterSpacing: '0.08em' }}>Log Outreach — {lead.businessName}</div>
+            <div style={{ display: 'flex', gap: 8 }}>
+              <div style={{ flex: 1 }}>
+                <div style={{ fontSize: 9, color: 'var(--fg-muted)', marginBottom: 3 }}>CHANNEL</div>
+                <select className="input" value={oChannel} onChange={e => setOChannel(e.target.value)}>
+                  {['email', 'linkedin', 'phone', 'whatsapp', 'other'].map(c => (
+                    <option key={c} value={c}>{c.toUpperCase()}</option>
+                  ))}
+                </select>
+              </div>
+              <div style={{ flex: 1 }}>
+                <div style={{ fontSize: 9, color: 'var(--fg-muted)', marginBottom: 3 }}>FOLLOW-UP DATE</div>
+                <input className="input" type="date" value={oFollowUp} onChange={e => setOFollowUp(e.target.value)} />
+              </div>
+            </div>
+            <div>
+              <div style={{ fontSize: 9, color: 'var(--fg-muted)', marginBottom: 3 }}>MESSAGE SENT *</div>
+              <textarea
+                className="input"
+                placeholder="Paste the message you sent…"
+                value={oMessage}
+                onChange={e => setOMessage(e.target.value)}
+                style={{ minHeight: 90, resize: 'vertical', fontFamily: 'inherit', fontSize: 11 }}
+              />
+            </div>
+            {oError && (
+              <div style={{ fontSize: 10, color: 'var(--danger)', padding: '5px 8px', border: '1px solid var(--danger)', borderRadius: 3 }}>{oError}</div>
+            )}
+            {oSuccess && (
+              <div style={{ fontSize: 10, color: 'var(--success)', padding: '5px 8px', border: '1px solid var(--success)', borderRadius: 3 }}>✓ Outreach logged successfully</div>
+            )}
+            <button className="btn btn-primary" onClick={submitOutreachLog} disabled={oSubmitting} style={{ alignSelf: 'flex-start', fontSize: 10, padding: '4px 16px' }}>
+              {oSubmitting ? 'SAVING…' : 'SAVE LOG'}
+            </button>
+          </div>
+        )}
 
         <div style={{ padding: 16, display: 'flex', flexDirection: 'column', gap: 14 }}>
 

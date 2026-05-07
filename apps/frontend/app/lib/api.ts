@@ -248,6 +248,11 @@ export const settings = {
     request<unknown>('/api/settings/scoring', { method: 'POST', body: JSON.stringify({ weights, reason }) }),
   prompts: (type?: string) =>
     request<{ data: unknown[] }>(`/api/settings/prompts${type ? `?type=${type}` : ''}`),
+  updatePrompt: (id: string, template: string, reason?: string) =>
+    request<unknown>(`/api/settings/prompts/${id}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ template, ...(reason && { reason }) }),
+    }),
 };
 
 // ── Campaigns ─────────────────────────────────────────────────────────────────

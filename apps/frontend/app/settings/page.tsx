@@ -151,19 +151,11 @@ export default function SettingsPage() {
     setSavingPrompt(true);
     setPromptMsg('');
     try {
-      // PATCH creates a new version
-      const res = await fetch(
-        `${process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:3001'}/api/settings/prompts/${editingPrompt._id}`,
-        {
-          method: 'PATCH',
-          headers: {
-            'Content-Type': 'application/json',
-            Authorization: `Bearer ${getToken()}`,
-          },
-          body: JSON.stringify({ template: editedTemplate, notes: editedNotes }),
-        },
+      await settings.updatePrompt(
+        editingPrompt._id,
+        editedTemplate,
+        editedNotes || undefined,
       );
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
       setPromptMsg('Prompt updated — new version saved and activated.');
       setEditingPrompt(null);
       await fetchPrompts();

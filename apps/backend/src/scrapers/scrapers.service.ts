@@ -10,9 +10,13 @@
  * Anti-detection: randomised delays, realistic UA, no-sandbox flags.
  */
 
-import { chromium, Browser, BrowserContext } from 'playwright-core';
+import { chromium } from 'playwright-extra';
+import StealthPlugin from 'puppeteer-extra-plugin-stealth';
+import { Browser, BrowserContext, Page } from 'playwright-core';
 import { logger } from '../lib/logger';
 import { sanitizeDomain } from '../utils/sanitize';
+
+chromium.use(StealthPlugin());
 
 export interface ScrapedBusiness {
   businessName: string;
@@ -27,13 +31,39 @@ export interface ScrapedBusiness {
 
 export type ScrapeSource = 'gmaps' | 'yellowpages' | 'yelp' | 'bing' | 'linkedin' | 'instagram' | 'manual';
 
+// ── Fingerprint rotation pools ───────────────────────────────────────────────
+
+const USER_AGENTS = [
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/118.0.0.0 Safari/537.36',
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+  'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+  'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+  'Mozilla/5.0 (Macintosh; Intel Mac OS X 14_4_1) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+  'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+  'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+];
+
+const VIEWPORTS = [
+  { width: 1920, height: 1080 },
+  { width: 1440, height: 900 },
+  { width: 1366, height: 768 },
+  { width: 1280, height: 800 },
+  { width: 1536, height: 864 },
+];
+
+function pickRandom<T>(arr: T[]): T {
+  return arr[Math.floor(Math.random() * arr.length)];
+}
+
 // ── Browser singleton ────────────────────────────────────────────────────────
 
 let browser: Browser | null = null;
 
 async function getBrowser(): Promise<Browser> {
   if (browser?.isConnected()) return browser;
-  browser = await chromium.launch({
+  browser = await (chromium as unknown as { launch: (opts: object) => Promise<Browser> }).launch({
     headless: true,
     args: [
       '--no-sandbox',
@@ -74,13 +104,38 @@ function extractDomain(url: string): string {
 
 async function newStealthContext(b: Browser): Promise<BrowserContext> {
   const ctx = await b.newContext({
-    userAgent:
-      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
-    viewport: { width: 1366, height: 768 },
+    userAgent: pickRandom(USER_AGENTS),
+    viewport: pickRandom(VIEWPORTS),
     locale: 'en-US',
+    colorScheme: 'light',
     permissions: [],
   });
+  await ctx.addInitScript(() => {
+    Object.defineProperty(navigator, 'webdriver', { get: () => false });
+  });
   return ctx;
+}
+
+// ── Selector resilience helper ───────────────────────────────────────────────
+
+async function trySelectors(page: Page, selectors: string[], timeout = 3000): Promise<string> {
+  for (const sel of selectors) {
+    try {
+      const text = await page.locator(sel).first().textContent({ timeout });
+      if (text?.trim()) return text.trim();
+    } catch { continue; }
+  }
+  return '';
+}
+
+async function trySelectorsAttr(page: Page, selectors: string[], attr: string, timeout = 3000): Promise<string | null> {
+  for (const sel of selectors) {
+    try {
+      const val = await page.locator(sel).first().getAttribute(attr, { timeout });
+      if (val?.trim()) return val.trim();
+    } catch { continue; }
+  }
+  return null;
 }
 
 // ── Google Maps scraper ──────────────────────────────────────────────────────
@@ -101,10 +156,6 @@ export async function scrapeGoogleMaps(
     const b = await getBrowser();
     context = await newStealthContext(b);
     const page = await context.newPage();
-
-    await page.addInitScript(() => {
-      Object.defineProperty(navigator, 'webdriver', { get: () => false });
-    });
 
     await page.goto(searchUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
     await page.waitForSelector('[role="feed"], [role="main"]', { timeout: 15000 }).catch(() => {});
@@ -145,14 +196,26 @@ export async function scrapeGoogleMaps(
         await randomDelay(600, 1200);
 
         const name = await page.locator('h1').first().textContent({ timeout: 5000 }).catch(() => '');
-        const category = await page.locator('[jsaction*="category"] span, [data-attrid="kc:/local:place_type"] span')
-          .first().textContent({ timeout: 3000 }).catch(() => '');
+        const category = await trySelectors(page, [
+          '[jsaction*="category"] span',
+          '[data-attrid="kc:/local:place_type"] span',
+          'button[jsaction*="category"]',
+          '.DkEaL',
+        ]);
 
-        const websiteEl = page.locator('a[data-item-id="authority"], a[href*="http"]:has-text("Website")').first();
-        const website = await websiteEl.getAttribute('href', { timeout: 3000 }).catch(() => null);
+        const website = await trySelectorsAttr(page, [
+          'a[data-item-id="authority"]',
+          'a[aria-label*="website" i]',
+          'a[href*="http"]:has-text("Website")',
+          'a[data-tooltip="Open website"]',
+        ], 'href');
 
-        const address = await page.locator('[data-item-id="address"] .rogA2c').first()
-          .textContent({ timeout: 3000 }).catch(() => '');
+        const address = await trySelectors(page, [
+          '[data-item-id="address"] .rogA2c',
+          '[data-item-id="address"]',
+          'button[data-item-id*="address"] .rogA2c',
+          '[data-tooltip="Copy address"]',
+        ]);
         const cityMatch = (address ?? '').match(/([A-Za-z\s]+),\s*([A-Z]{2})/);
         const city = cityMatch?.[1]?.trim();
 
@@ -209,9 +272,9 @@ export async function scrapeYellowPages(
     await randomDelay(1000, 2000);
 
     // Wait for results
-    await page.waitForSelector('.result, .srp-listing', { timeout: 10000 }).catch(() => {});
+    await page.waitForSelector('.result, .srp-listing, .organic .info', { timeout: 10000 }).catch(() => {});
 
-    const listings = await page.locator('.result, .srp-listing').all();
+    const listings = await page.locator('.result, .srp-listing, .organic .info').all();
     logger.info('Scraper[yellowpages]: found listings', { count: listings.length });
 
     for (const listing of listings.slice(0, maxResults)) {
@@ -347,12 +410,19 @@ export async function scrapeYelp(
           .textContent({ timeout: 5000 }).catch(() => '');
         if (!name?.trim()) { await bizPage.close(); continue; }
 
-        const category = await bizPage.locator('[data-testid="bizDetailsLocalBizCategory"] a, .arrange-unit a[href*="category"]').first()
-          .textContent({ timeout: 3000 }).catch(() => undefined);
+        const category = await trySelectors(bizPage, [
+          '[data-testid="bizDetailsLocalBizCategory"] a',
+          '.arrange-unit a[href*="category"]',
+          'span[class*="category"] a',
+          'a[href*="/c/"]',
+        ]);
 
-        // Website link on Yelp biz pages
-        const websiteEl = await bizPage.locator('a[href*="biz_redir"], a[data-testid="bizDetailsWebsite"]').first()
-          .getAttribute('href', { timeout: 3000 }).catch(() => null);
+        const websiteEl = await trySelectorsAttr(bizPage, [
+          'a[href*="biz_redir"]',
+          'a[data-testid="bizDetailsWebsite"]',
+          'a[href*="redirect_url"]',
+          'p a[href*="http"]:not([href*="yelp.com"])',
+        ], 'href');
 
         // Extract actual domain from Yelp redirect URL
         let website: string | undefined;

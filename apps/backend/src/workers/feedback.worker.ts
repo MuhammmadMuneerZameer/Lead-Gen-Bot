@@ -17,7 +17,7 @@ import { OutcomeLog } from '../models/outcomeLog.model';
 import { PromptTemplate } from '../models/promptTemplate.model';
 import { ScoringConfig } from '../models/scoringConfig.model';
 import { optimizerQueue } from '../lib/queues';
-import { guardedAICall, MODEL_SONNET } from '../ai/guardedAICall';
+import { guardedAICall, MODEL_PRIMARY } from '../ai/guardedAICall';
 import { SelfImproveLog } from '../models/selfImproveLog.model';
 
 const MIN_SAMPLE_SIZE = 10;     // Don't optimise with fewer outcomes than this
@@ -140,7 +140,7 @@ Return JSON array (max 4 changes, ±5pts each):[{"factor":"","oldWeight":0,"newW
 
     try {
       const result = await guardedAICall({
-        model: MODEL_SONNET,
+        model: MODEL_PRIMARY,
         systemPrompt,
         userPrompt,
         purpose: 'prompt_optimization',

@@ -24,8 +24,8 @@ const deepseekClient = new OpenAI({
   baseURL: 'https://api.deepseek.com',
 });
 
-export const MODEL_SONNET: AIModel = 'gpt-4o';
-export const MODEL_HAIKU: AIModel = 'deepseek-chat';
+export const MODEL_PRIMARY: AIModel = 'gpt-4o';       // OpenAI GPT-4o — HOT leads
+export const MODEL_SECONDARY: AIModel = 'deepseek-chat'; // DeepSeek — WARM/batch leads
 
 // Daily spend ceiling loaded from env (default $5/day)
 const DAILY_BUDGET_USD = parseFloat(process.env.AI_DAILY_BUDGET_USD ?? '5');

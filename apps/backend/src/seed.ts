@@ -176,13 +176,15 @@ async function seedPromptTemplates(): Promise<void> {
 
 async function seedAdminUser(): Promise<void> {
   const adminEmail = process.env.ADMIN_EMAIL ?? 'admin@hydrafox.local';
-  const adminPassword = process.env.ADMIN_PASSWORD ?? 'HydraFox2025!';
 
   const existing = await User.findOne({ email: adminEmail });
   if (existing) {
     logger.info('Admin user seed skipped — user already exists', { email: adminEmail });
     return;
   }
+
+  const adminPassword = process.env.ADMIN_PASSWORD;
+  if (!adminPassword) throw new Error('ADMIN_PASSWORD env var is required to seed the admin user');
 
   const passwordHash = await hashPassword(adminPassword);
   await User.create({

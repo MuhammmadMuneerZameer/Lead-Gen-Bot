@@ -2,14 +2,14 @@
  * AIService — all Claude interactions go through guardedAICall().
  *
  * Routing rules (from spec):
- *  - HOT leads  → claude-sonnet-4-20250514  (best quality, higher cost)
- *  - WARM batch → claude-haiku-4-5-20251001 (60-80% cost reduction)
+ *  - HOT leads  → gpt-4o        (OpenAI — best quality, higher cost)
+ *  - WARM batch → deepseek-chat  (DeepSeek — 60-80% cost reduction)
  *
  * Prompt text is loaded from DB (promptTemplates collection) — never hardcoded here.
  */
 
 import crypto from 'crypto';
-import { guardedAICall, MODEL_SONNET, MODEL_HAIKU } from './guardedAICall';
+import { guardedAICall, MODEL_PRIMARY, MODEL_SECONDARY } from './guardedAICall';
 import { PromptTemplate } from '../models/promptTemplate.model';
 import { IEnrichment } from '../models/enrichment.model';
 import { ILead } from '../models/lead.model';
@@ -91,7 +91,7 @@ No markdown fences, no explanation — raw JSON only.`;
     const cacheKey = buildCacheKey('analysis', `${lead.domain}:${enrichment.performanceScore}:${enrichment.cms}`);
 
     const result = await guardedAICall({
-      model: MODEL_SONNET,
+      model: MODEL_PRIMARY,
       systemPrompt,
       userPrompt,
       purpose: 'lead_analysis',
@@ -147,7 +147,7 @@ Same array length as input, same order. Raw JSON array only — no markdown, no 
     );
 
     const result = await guardedAICall({
-      model: MODEL_HAIKU,
+      model: MODEL_SECONDARY,
       systemPrompt,
       userPrompt,
       purpose: 'batch_analysis',
@@ -182,7 +182,7 @@ Same array length as input, same order. Raw JSON array only — no markdown, no 
 
   /**
    * Generate an outreach message (email or LinkedIn) for a lead.
-   * Uses Sonnet for HOT, Haiku for WARM.
+   * Uses MODEL_PRIMARY (gpt-4o) for HOT, MODEL_SECONDARY (deepseek-chat) for WARM.
    */
   async generateOutreach(
     lead: Pick<ILead, '_id' | 'businessName' | 'domain' | 'industry' | 'opportunityLevel'>,
@@ -198,13 +198,15 @@ Same array length as input, same order. Raw JSON array only — no markdown, no 
       industry: lead.industry ?? 'unknown',
       primaryPain: analysis.primaryPain,
       pitchAngle: analysis.pitchAngle ?? 'digital transformation opportunity',
+      agencyName: process.env.AGENCY_NAME ?? 'Our Agency',
+      offerSummary: process.env.OFFER_SUMMARY ?? 'We help local businesses grow online',
     });
 
     const systemPrompt = channel === 'email'
       ? `You are an expert B2B cold email copywriter. Write a short, personalised cold email. Return JSON with keys: subject (string), body (string). Raw JSON only.`
       : `You are an expert LinkedIn outreach copywriter. Write a short personalised connection request note (max 300 chars). Return JSON with key: body (string). Raw JSON only.`;
 
-    const model = lead.opportunityLevel === 'high' ? MODEL_SONNET : MODEL_HAIKU;
+    const model = lead.opportunityLevel === 'high' ? MODEL_PRIMARY : MODEL_SECONDARY;
 
     const cacheKey = buildCacheKey(
       `outreach_${channel}`,
